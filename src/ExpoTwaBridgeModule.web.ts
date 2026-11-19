@@ -1,6 +1,22 @@
-import { registerWebModule, NativeModule } from 'expo';
+import { NativeModule, registerWebModule } from 'expo';
 
-// ExpoTwaBridgeModule is not available on the web platform.
-class ExpoTwaBridgeModule extends NativeModule<{}> {}
+import type { TwaLaunchOptions } from './ExpoTwaBridge.types';
 
-export default registerWebModule(ExpoTwaBridgeModule, 'ExpoTwaBridgeModule');
+class ExpoTwaBridgeModule extends NativeModule<{}> {
+  async launch(): Promise<void> {
+    throw new Error('Trusted Web Activities are only available on Android.');
+  }
+}
+
+const ExpoTwaBridgeModuleInstance = registerWebModule(
+  ExpoTwaBridgeModule,
+  'ExpoTwaBridgeModule'
+);
+
+export const ExpoTwaBridge = {
+  launch(_options: TwaLaunchOptions): Promise<void> {
+    return ExpoTwaBridgeModuleInstance.launch();
+  },
+};
+
+export default ExpoTwaBridge;

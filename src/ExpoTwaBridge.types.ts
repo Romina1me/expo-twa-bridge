@@ -1,1 +1,6 @@
-// Define your exported module types here.
+export type TwaLaunchOptions = {
+  /**
+   * Absolute HTTPS URL to open in the Trusted Web Activity.
+   */
+  url: string;
+};
