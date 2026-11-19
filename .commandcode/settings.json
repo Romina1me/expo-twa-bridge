@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(git:*)",
+      "Shell(ls E:\\figfit\\expo-twa-bridge\\node_modules 2>nul | find /c \".\" & dir E:\\figfit\\expo-twa-bridge\\node_modules /b 2>nul | findstr /i \"expo$ react-native$\")",
+      "Shell(if:*)",
+      "Shell(else:*)",
+      "powershell"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

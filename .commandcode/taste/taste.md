@@ -1,0 +1,2 @@
+- Inspects and understands the full existing project structure before making any changes; expects architectural decisions and trade-offs to be explained before implementation begins. Confidence: 0.8
+- Requires native changes to live in maintained package source files (e.g., Expo config plugins), never as manual edits to generated `android/` files; code must survive `npx expo prebuild --clean`. Confidence: 0.85
