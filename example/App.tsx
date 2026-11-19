@@ -4,17 +4,19 @@ import {
   Button,
   SafeAreaView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
 } from 'react-native';
 
-import { ExpoTwaBridge } from 'expo-twa-bridge';
+import { ExpoTwaBridge, TwaLaunchError } from 'expo-twa-bridge';
 
 const DEFAULT_URL = 'https://figfit.ir';
 
 export default function App() {
   const [url, setUrl] = useState(DEFAULT_URL);
+  const [immersive, setImmersive] = useState(true);
   const [isLaunching, setIsLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,12 +25,17 @@ export default function App() {
     setError(null);
 
     try {
-      await ExpoTwaBridge.launch({ url });
+      await ExpoTwaBridge.launch({
+        url,
+        displayMode: immersive ? 'immersive' : 'default',
+      });
     } catch (launchError) {
       setError(
-        launchError instanceof Error
-          ? launchError.message
-          : String(launchError)
+        launchError instanceof TwaLaunchError
+          ? `${launchError.code}: ${launchError.message}`
+          : launchError instanceof Error
+            ? launchError.message
+            : String(launchError)
       );
     } finally {
       setIsLaunching(false);
@@ -50,6 +57,15 @@ export default function App() {
           editable={!isLaunching}
           placeholder="https://example.com"
         />
+
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>Immersive (hide system bars)</Text>
+          <Switch
+            value={immersive}
+            onValueChange={setImmersive}
+            disabled={isLaunching}
+          />
+        </View>
 
         {isLaunching ? (
           <View style={styles.loading}>
@@ -92,6 +108,16 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     paddingHorizontal: 12,
     paddingVertical: 10,
+  },
+  row: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  rowLabel: {
+    color: '#333333',
+    flex: 1,
+    marginRight: 12,
   },
   loading: {
     alignItems: 'center',

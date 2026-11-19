@@ -1,10 +1,14 @@
 import { NativeModule, registerWebModule } from 'expo';
 
+import { TwaLaunchError } from './ExpoTwaBridge.errors';
 import type { TwaLaunchOptions } from './ExpoTwaBridge.types';
 
 class ExpoTwaBridgeModule extends NativeModule<{}> {
   async launch(): Promise<void> {
-    throw new Error('Trusted Web Activities are only available on Android.');
+    throw new TwaLaunchError(
+      'ERR_TWA_UNSUPPORTED',
+      'Trusted Web Activities are only available on Android.'
+    );
   }
 }
 
@@ -14,8 +18,8 @@ const ExpoTwaBridgeModuleInstance = registerWebModule(
 );
 
 export const ExpoTwaBridge = {
-  launch(_options: TwaLaunchOptions): Promise<void> {
-    return ExpoTwaBridgeModuleInstance.launch();
+  async launch(_options: TwaLaunchOptions): Promise<void> {
+    await ExpoTwaBridgeModuleInstance.launch();
   },
 };
 
