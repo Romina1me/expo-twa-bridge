@@ -1,7 +1,9 @@
 package expo.modules.twabridge
 
+import android.net.Uri
 import android.util.Log
 import android.view.WindowManager
+import androidx.browser.customtabs.CustomTabsService
 import androidx.browser.trusted.TrustedWebActivityDisplayMode
 import com.google.androidbrowserhelper.trusted.TwaProviderPicker
 import expo.modules.kotlin.Promise
@@ -11,16 +13,26 @@ import expo.modules.kotlin.modules.ModuleDefinition
 private const val DISPLAY_MODE_DEFAULT = "default"
 private const val DISPLAY_MODE_IMMERSIVE = "immersive"
 
+private data class PostMessageConfig(
+  val sourceOrigin: String,
+  val targetOrigin: String
+)
+
 class ExpoTwaBridgeModule : Module() {
   private var launcher: StrictTwaLauncher? = null
 
   override fun definition() = ModuleDefinition {
     Name("ExpoTwaBridge")
 
+    Events("onMessage", "onChannelReady", "onChannelError", "onChannelClosed")
+
     AsyncFunction("launch") {
         url: String,
         displayMode: String,
         additionalTrustedOrigins: List<String>,
+        enablePostMessage: Boolean,
+        postMessageSourceOrigin: String?,
+        postMessageTargetOrigin: String?,
         promise: Promise ->
       val activity = appContext.currentActivity
       if (activity == null) {
@@ -62,6 +74,20 @@ class ExpoTwaBridgeModule : Module() {
         return@AsyncFunction
       }
 
+      val postMessageConfig = if (enablePostMessage) {
+        parsePostMessageConfig(uri, postMessageSourceOrigin, postMessageTargetOrigin)
+      } else {
+        null
+      }
+      if (enablePostMessage && postMessageConfig == null) {
+        promise.reject(
+          "ERR_TWA_POSTMESSAGE_INVALID_ORIGIN",
+          "PostMessage origins must be absolute HTTPS origins without a path.",
+          null
+        )
+        return@AsyncFunction
+      }
+
       // Custom Tabs service binding and Activity launching must happen on the UI thread.
       activity.runOnUiThread {
         try {
@@ -86,7 +112,7 @@ class ExpoTwaBridgeModule : Module() {
           Log.i(
             TAG,
             "Verifying TWA relationship: provider=$providerPackage, displayMode=$displayMode, " +
-              "additionalTrustedOrigins=$trustedOrigins, url=$url"
+              "additionalTrustedOrigins=$trustedOrigins, postMessage=$postMessageConfig, url=$url"
           )
 
           val strictLauncher = StrictTwaLauncher(activity)
@@ -97,6 +123,8 @@ class ExpoTwaBridgeModule : Module() {
             uri,
             mode,
             trustedOrigins,
+            postMessageConfig?.sourceOrigin,
+            postMessageConfig?.targetOrigin,
             object : StrictTwaLauncher.Callback {
               override fun onLaunched() {
                 Log.i(TAG, "TWA launched with verified origins.")
@@ -105,6 +133,25 @@ class ExpoTwaBridgeModule : Module() {
 
               override fun onError(code: String, message: String, cause: Throwable?) {
                 promise.reject(code, message, cause)
+              }
+
+              override fun onChannelReady() {
+                sendEvent("onChannelReady")
+              }
+
+              override fun onChannelError(code: String, message: String) {
+                sendEvent(
+                  "onChannelError",
+                  mapOf("code" to code, "message" to message)
+                )
+              }
+
+              override fun onChannelClosed() {
+                sendEvent("onChannelClosed")
+              }
+
+              override fun onMessage(data: String) {
+                sendEvent("onMessage", mapOf("data" to data))
               }
             }
           )
@@ -116,6 +163,37 @@ class ExpoTwaBridgeModule : Module() {
           )
         }
       }
+    }
+
+    AsyncFunction("postMessage") { message: String, promise: Promise ->
+      val currentLauncher = launcher
+      if (currentLauncher == null) {
+        promise.reject(
+          "ERR_TWA_POSTMESSAGE_NOT_READY",
+          "The PostMessage channel is not ready. Launch a TWA with postMessage enabled first.",
+          null
+        )
+        return@AsyncFunction
+      }
+
+      val result = currentLauncher.postMessage(message)
+      when (result) {
+        null -> promise.reject(
+          "ERR_TWA_POSTMESSAGE_NOT_READY",
+          "The PostMessage channel is not ready.",
+          null
+        )
+        CustomTabsService.RESULT_SUCCESS -> promise.resolve(null)
+        else -> promise.reject(
+          "ERR_TWA_POSTMESSAGE_FAILED",
+          "The browser rejected the PostMessage (result code $result).",
+          null
+        )
+      }
+    }
+
+    AsyncFunction("isPostMessageReady") {
+      launcher?.isPostMessageReady() == true
     }
 
     OnDestroy {
@@ -143,5 +221,15 @@ class ExpoTwaBridgeModule : Module() {
       }
     }
     return result
+  }
+
+  private fun parsePostMessageConfig(
+    uri: Uri,
+    sourceOrigin: String?,
+    targetOrigin: String?
+  ): PostMessageConfig? {
+    val source = sourceOrigin?.let(::parseOrigin) ?: originOf(uri) ?: return null
+    val target = targetOrigin?.let(::parseOrigin) ?: source
+    return PostMessageConfig(source, target)
   }
 }

@@ -7,10 +7,16 @@ export type TwaErrorCode =
   | 'ERR_TWA_VERIFICATION_FAILED'
   | 'ERR_TWA_VERIFICATION_TIMEOUT'
   | 'ERR_TWA_LAUNCH_FAILED'
+  | 'ERR_TWA_POSTMESSAGE_INVALID_ORIGIN'
+  | 'ERR_TWA_POSTMESSAGE_VERIFICATION_FAILED'
+  | 'ERR_TWA_POSTMESSAGE_UNAVAILABLE'
+  | 'ERR_TWA_POSTMESSAGE_NOT_READY'
+  | 'ERR_TWA_POSTMESSAGE_FAILED'
+  | 'ERR_TWA_POSTMESSAGE_TIMEOUT'
   | 'ERR_TWA_UNSUPPORTED';
 
 /**
- * Error thrown by `ExpoTwaBridge.launch()`.
+ * Error thrown by `ExpoTwaBridge.launch()` or `ExpoTwaBridge.postMessage()`.
  *
  * Digital Asset Links verification failures are thrown as
  * `ERR_TWA_VERIFICATION_FAILED`; the TWA never opens in that case.

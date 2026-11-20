@@ -6,9 +6,9 @@
     "orientation": "portrait",
     "platforms": ["android"],
     "android": {
-      "package": "expo.modules.twabridge.example"
+      "package": "ir.figfit.figfit"
     },
-    "plugins": ["expo-twa-bridge"],
+    "plugins": ["expo-twa-bridge", "./plugins/withFigfitSigning"],
     "experiments": {
       "autolinkingModuleResolution": true
     }

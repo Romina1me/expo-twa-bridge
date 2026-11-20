@@ -16,19 +16,23 @@ import androidx.browser.trusted.TrustedWebActivityDisplayMode
 import androidx.browser.trusted.TrustedWebActivityIntentBuilder
 
 /**
- * Launches a Trusted Web Activity only after the browser has confirmed the
- * Digital Asset Links relationship (`handle_all_urls`) for every requested
- * origin.
+ * Single owner of the CustomTabsClient/CustomTabsSession used for both the TWA
+ * launch and the optional PostMessage channel.
  *
- * This deliberately owns the [CustomTabsSession] so future PostMessage and
- * MessagePort support can reuse the same connection instead of replacing the
- * launch path.
+ * The TWA is only launched after `handle_all_urls` Digital Asset Links
+ * verification succeeds for every requested origin. When PostMessage is
+ * enabled, the same session additionally validates `use_as_origin` and opens a
+ * MessagePort-backed channel after the first navigation finishes.
  */
 internal class StrictTwaLauncher(private val activity: Activity) {
 
   internal interface Callback {
     fun onLaunched()
     fun onError(code: String, message: String, cause: Throwable?)
+    fun onChannelReady()
+    fun onChannelError(code: String, message: String)
+    fun onChannelClosed()
+    fun onMessage(data: String)
   }
 
   private val handler = Handler(Looper.getMainLooper())
@@ -39,15 +43,36 @@ internal class StrictTwaLauncher(private val activity: Activity) {
   private var uri: Uri? = null
   private var displayMode: TrustedWebActivityDisplayMode? = null
   private var additionalTrustedOrigins: List<String> = emptyList()
-  private var pendingOrigins: MutableSet<String> = mutableSetOf()
-  private var callback: Callback? = null
-  private var settled = false
 
-  private val timeoutRunnable = Runnable {
-    fail(
+  private var postMessageSourceOrigin: String? = null
+  private var postMessageTargetOrigin: String? = null
+  private var postMessageValidationComplete = false
+  private var postMessageValidated = false
+  private var navigationFinished = false
+  private var channelRequested = false
+  private var channelReady = false
+  private var channelErrorEmitted = false
+  private var channelClosedEmitted = false
+
+  private var pendingLaunchOrigins: MutableSet<String> = mutableSetOf()
+  private var callback: Callback? = null
+  private var launchSettled = false
+
+  private val launchTimeoutRunnable = Runnable {
+    failLaunch(
       "ERR_TWA_VERIFICATION_TIMEOUT",
       "Digital Asset Links verification timed out. The browser did not respond within " +
-        "${TIMEOUT_MS / 1000} seconds.",
+        "${LAUNCH_TIMEOUT_MS / 1000} seconds.",
+      null
+    )
+  }
+
+  private val channelTimeoutRunnable = Runnable {
+    emitChannelError(
+      "ERR_TWA_POSTMESSAGE_TIMEOUT",
+      "The PostMessage channel was not ready within ${CHANNEL_TIMEOUT_MS / 1000} seconds. " +
+        "Check that the origin has the use_as_origin Digital Asset Links relation, the " +
+        "PostMessageService is declared, and Chrome 115+ is used.",
       null
     )
   }
@@ -59,32 +84,44 @@ internal class StrictTwaLauncher(private val activity: Activity) {
       result: Boolean,
       extras: Bundle?
     ) {
-      if (settled || relation != CustomTabsService.RELATION_HANDLE_ALL_URLS) {
-        return
-      }
-
       val origin = originOf(requestedOrigin) ?: return
-      if (!pendingOrigins.remove(origin)) {
+
+      when (relation) {
+        CustomTabsService.RELATION_HANDLE_ALL_URLS -> handleLaunchValidation(origin, result)
+        CustomTabsService.RELATION_USE_AS_ORIGIN -> handlePostMessageValidation(origin, result)
+      }
+    }
+
+    override fun onNavigationEvent(navigationEvent: Int, extras: Bundle?) {
+      if (navigationEvent == NAVIGATION_FINISHED) {
+        navigationFinished = true
+        maybeRequestPostMessageChannel()
+      }
+    }
+
+    override fun onMessageChannelReady(extras: Bundle?) {
+      if (
+        !isPostMessageEnabled() ||
+        channelReady ||
+        channelClosedEmitted ||
+        channelErrorEmitted
+      ) {
         return
       }
 
-      Log.i(TAG, "Digital Asset Links result for $origin: validated=$result")
+      handler.removeCallbacks(channelTimeoutRunnable)
+      channelReady = true
+      Log.i(TAG, "PostMessage channel ready.")
+      callback?.onChannelReady()
+    }
 
-      if (!result) {
-        fail(
-          "ERR_TWA_VERIFICATION_FAILED",
-          "Digital Asset Links verification failed for $origin. Serve " +
-            "$origin/.well-known/assetlinks.json with this app's package name and " +
-            "signing certificate SHA-256 for the " +
-            "delegate_permission/common.handle_all_urls relation.",
-          null
-        )
+    override fun onPostMessage(message: String, extras: Bundle?) {
+      if (!isPostMessageEnabled() || !channelReady || channelClosedEmitted) {
         return
       }
 
-      if (pendingOrigins.isEmpty()) {
-        launchValidated()
-      }
+      Log.i(TAG, "PostMessage received (${message.length} chars).")
+      callback?.onMessage(message)
     }
   }
 
@@ -93,17 +130,21 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     uri: Uri,
     displayMode: TrustedWebActivityDisplayMode,
     additionalTrustedOrigins: List<String>,
+    postMessageSourceOrigin: String?,
+    postMessageTargetOrigin: String?,
     callback: Callback
   ) {
     this.uri = uri
     this.displayMode = displayMode
     this.additionalTrustedOrigins = additionalTrustedOrigins
+    this.postMessageSourceOrigin = postMessageSourceOrigin
+    this.postMessageTargetOrigin = postMessageTargetOrigin
     this.callback = callback
-    this.pendingOrigins = mutableSetOf()
+    this.pendingLaunchOrigins = mutableSetOf()
 
     val mainOrigin = originOf(uri)
     if (mainOrigin == null) {
-      fail(
+      failLaunch(
         "ERR_TWA_INVALID_URL",
         "Only absolute HTTPS URLs can be opened in a Trusted Web Activity.",
         null
@@ -111,18 +152,18 @@ internal class StrictTwaLauncher(private val activity: Activity) {
       return
     }
 
-    pendingOrigins.add(mainOrigin)
-    pendingOrigins.addAll(additionalTrustedOrigins)
+    pendingLaunchOrigins.add(mainOrigin)
+    pendingLaunchOrigins.addAll(additionalTrustedOrigins)
 
     val serviceConnection = object : CustomTabsServiceConnection() {
       override fun onCustomTabsServiceConnected(name: ComponentName, client: CustomTabsClient) {
-        if (settled) {
+        if (launchSettled) {
           return
         }
 
         try {
           if (!client.warmup(0)) {
-            fail(
+            failLaunch(
               "ERR_TWA_LAUNCH_FAILED",
               "The browser rejected the Custom Tabs warmup request.",
               null
@@ -132,7 +173,7 @@ internal class StrictTwaLauncher(private val activity: Activity) {
 
           val newSession = client.newSession(sessionCallback)
           if (newSession == null) {
-            fail(
+            failLaunch(
               "ERR_TWA_LAUNCH_FAILED",
               "The browser could not create a Custom Tabs session.",
               null
@@ -141,14 +182,14 @@ internal class StrictTwaLauncher(private val activity: Activity) {
           }
           session = newSession
 
-          for (origin in pendingOrigins.toList()) {
+          for (origin in pendingLaunchOrigins.toList()) {
             val submitted = newSession.validateRelationship(
               CustomTabsService.RELATION_HANDLE_ALL_URLS,
               Uri.parse(origin),
               null
             )
             if (!submitted) {
-              fail(
+              failLaunch(
                 "ERR_TWA_LAUNCH_FAILED",
                 "The browser rejected Digital Asset Links verification for $origin.",
                 null
@@ -156,8 +197,24 @@ internal class StrictTwaLauncher(private val activity: Activity) {
               return
             }
           }
+
+          if (isPostMessageEnabled()) {
+            val sourceOrigin = postMessageSourceOrigin ?: return
+            val submitted = newSession.validateRelationship(
+              CustomTabsService.RELATION_USE_AS_ORIGIN,
+              Uri.parse(sourceOrigin),
+              null
+            )
+            if (!submitted) {
+              emitChannelError(
+                "ERR_TWA_POSTMESSAGE_UNAVAILABLE",
+                "The browser rejected PostMessage origin validation for $sourceOrigin.",
+                null
+              )
+            }
+          }
         } catch (error: Exception) {
-          fail(
+          failLaunch(
             "ERR_TWA_LAUNCH_FAILED",
             error.message ?: "The Trusted Web Activity could not be prepared.",
             error
@@ -166,13 +223,18 @@ internal class StrictTwaLauncher(private val activity: Activity) {
       }
 
       override fun onServiceDisconnected(name: ComponentName) {
-        if (!settled) {
-          fail(
+        if (!launchSettled) {
+          failLaunch(
             "ERR_TWA_NO_BROWSER",
             "The Trusted Web Activity browser disconnected before verification completed.",
             null
           )
+          return
         }
+
+        session = null
+        channelReady = false
+        emitChannelClosed()
       }
     }
 
@@ -181,7 +243,7 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     val bound = try {
       CustomTabsClient.bindCustomTabsService(activity, providerPackage, serviceConnection)
     } catch (error: Exception) {
-      fail(
+      failLaunch(
         "ERR_TWA_LAUNCH_FAILED",
         error.message ?: "Could not bind to the Trusted Web Activity browser service.",
         error
@@ -190,7 +252,7 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     }
 
     if (!bound) {
-      fail(
+      failLaunch(
         "ERR_TWA_NO_BROWSER",
         "Could not connect to the Trusted Web Activity browser service.",
         null
@@ -198,24 +260,147 @@ internal class StrictTwaLauncher(private val activity: Activity) {
       return
     }
 
-    handler.postDelayed(timeoutRunnable, TIMEOUT_MS)
+    handler.postDelayed(launchTimeoutRunnable, LAUNCH_TIMEOUT_MS)
   }
 
+  /**
+   * Sends a message to the web page through the existing session.
+   *
+   * Returns the browser result code, or null when the channel is not ready.
+   */
+  fun postMessage(message: String): Int? {
+    if (!channelReady || channelClosedEmitted) {
+      return null
+    }
+    val currentSession = session ?: return null
+    return currentSession.postMessage(message, null)
+  }
+
+  fun isPostMessageReady(): Boolean = channelReady && !channelClosedEmitted
+
   fun destroy() {
-    settled = true
-    handler.removeCallbacks(timeoutRunnable)
+    val wasChannelActive = isPostMessageEnabled() && (channelReady || channelRequested)
+
+    launchSettled = true
+    handler.removeCallbacks(launchTimeoutRunnable)
+    handler.removeCallbacks(channelTimeoutRunnable)
     unbind()
-    callback = null
     session = null
+    channelReady = false
+
+    if (wasChannelActive) {
+      emitChannelClosed()
+    }
+
+    callback = null
+  }
+
+  private fun handleLaunchValidation(origin: String, validated: Boolean) {
+    if (launchSettled) {
+      return
+    }
+    if (!pendingLaunchOrigins.remove(origin)) {
+      return
+    }
+
+    Log.i(TAG, "Digital Asset Links result for $origin: validated=$validated")
+
+    if (!validated) {
+      failLaunch(
+        "ERR_TWA_VERIFICATION_FAILED",
+        "Digital Asset Links verification failed for $origin. Serve " +
+          "$origin/.well-known/assetlinks.json with this app's package name and " +
+          "signing certificate SHA-256 for the " +
+          "delegate_permission/common.handle_all_urls relation.",
+        null
+      )
+      return
+    }
+
+    if (pendingLaunchOrigins.isEmpty()) {
+      launchValidated()
+    }
+  }
+
+  private fun handlePostMessageValidation(origin: String, validated: Boolean) {
+    val sourceOrigin = postMessageSourceOrigin ?: return
+    if (!origin.equals(sourceOrigin, ignoreCase = true) || postMessageValidationComplete) {
+      return
+    }
+
+    postMessageValidationComplete = true
+    postMessageValidated = validated
+    Log.i(TAG, "PostMessage use_as_origin result for $origin: validated=$validated")
+
+    if (!validated) {
+      emitChannelError(
+        "ERR_TWA_POSTMESSAGE_VERIFICATION_FAILED",
+        "Digital Asset Links verification failed for $origin with the " +
+          "delegate_permission/common.use_as_origin relation required by PostMessage.",
+        null
+      )
+      return
+    }
+
+    maybeRequestPostMessageChannel()
+  }
+
+  private fun maybeRequestPostMessageChannel() {
+    if (
+      !launchSettled ||
+      channelRequested ||
+      channelReady ||
+      channelErrorEmitted ||
+      channelClosedEmitted
+    ) {
+      return
+    }
+    if (!isPostMessageEnabled() || !postMessageValidated || !navigationFinished) {
+      return
+    }
+
+    val currentSession = session ?: return
+    val sourceOrigin = postMessageSourceOrigin ?: return
+    val targetOrigin = postMessageTargetOrigin ?: return
+
+    channelRequested = true
+
+    val accepted = try {
+      currentSession.requestPostMessageChannel(
+        Uri.parse(sourceOrigin),
+        Uri.parse(targetOrigin),
+        Bundle()
+      )
+    } catch (error: Exception) {
+      emitChannelError(
+        "ERR_TWA_POSTMESSAGE_UNAVAILABLE",
+        error.message ?: "The browser rejected the PostMessage channel request.",
+        error
+      )
+      return
+    }
+
+    if (!accepted) {
+      emitChannelError(
+        "ERR_TWA_POSTMESSAGE_UNAVAILABLE",
+        "The browser rejected the PostMessage channel request. Ensure " +
+          "androidx.browser.customtabs.PostMessageService is declared and the browser " +
+          "supports TWA PostMessage (Chrome 115+).",
+        null
+      )
+      return
+    }
+
+    Log.i(TAG, "Requested PostMessage channel: source=$sourceOrigin target=$targetOrigin")
   }
 
   private fun launchValidated() {
     val uri = uri
     val displayMode = displayMode
-    val session = session
+    val currentSession = session
 
-    if (uri == null || displayMode == null || session == null) {
-      fail(
+    if (uri == null || displayMode == null || currentSession == null) {
+      failLaunch(
         "ERR_TWA_LAUNCH_FAILED",
         "The Trusted Web Activity could not be prepared.",
         null
@@ -229,13 +414,17 @@ internal class StrictTwaLauncher(private val activity: Activity) {
         builder.setAdditionalTrustedOrigins(additionalTrustedOrigins)
       }
 
-      builder.build(session).launchTrustedWebActivity(activity)
+      builder.build(currentSession).launchTrustedWebActivity(activity)
 
-      settled = true
-      handler.removeCallbacks(timeoutRunnable)
+      launchSettled = true
+      handler.removeCallbacks(launchTimeoutRunnable)
       callback?.onLaunched()
+
+      if (isPostMessageEnabled()) {
+        handler.postDelayed(channelTimeoutRunnable, CHANNEL_TIMEOUT_MS)
+      }
     } catch (error: Exception) {
-      fail(
+      failLaunch(
         "ERR_TWA_LAUNCH_FAILED",
         error.message ?: "The Trusted Web Activity could not be launched.",
         error
@@ -243,18 +432,45 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     }
   }
 
-  private fun fail(code: String, message: String, cause: Throwable?) {
-    if (settled) {
+  private fun isPostMessageEnabled(): Boolean =
+    postMessageSourceOrigin != null && postMessageTargetOrigin != null
+
+  private fun emitChannelError(code: String, message: String, cause: Throwable?) {
+    if (channelErrorEmitted || channelClosedEmitted) {
       return
     }
-    settled = true
-    handler.removeCallbacks(timeoutRunnable)
+    channelErrorEmitted = true
+    handler.removeCallbacks(channelTimeoutRunnable)
+    Log.w(TAG, "$code: $message", cause)
+    callback?.onChannelError(code, message)
+  }
+
+  private fun emitChannelClosed() {
+    if (channelClosedEmitted || channelErrorEmitted) {
+      return
+    }
+    if (!channelReady && !channelRequested) {
+      return
+    }
+    channelClosedEmitted = true
+    handler.removeCallbacks(channelTimeoutRunnable)
+    Log.i(TAG, "PostMessage channel closed.")
+    callback?.onChannelClosed()
+  }
+
+  private fun failLaunch(code: String, message: String, cause: Throwable?) {
+    if (launchSettled) {
+      return
+    }
+    launchSettled = true
+    handler.removeCallbacks(launchTimeoutRunnable)
+    handler.removeCallbacks(channelTimeoutRunnable)
     unbind()
     session = null
 
-    val currentCallback = callback
-    callback = null
-    currentCallback?.onError(code, message, cause)
+    // Keep the callback alive: PostMessage validation results may still be
+    // delivered after the launch itself has failed, and they must reach JS.
+    callback?.onError(code, message, cause)
   }
 
   private fun unbind() {
@@ -268,6 +484,7 @@ internal class StrictTwaLauncher(private val activity: Activity) {
   }
 
   private companion object {
-    const val TIMEOUT_MS = 15_000L
+    const val LAUNCH_TIMEOUT_MS = 15_000L
+    const val CHANNEL_TIMEOUT_MS = 25_000L
   }
 }

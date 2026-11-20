@@ -4,11 +4,11 @@ const CUSTOM_TABS_SERVICE_ACTION =
   'android.support.customtabs.action.CustomTabsService';
 const VIEW_ACTION = 'android.intent.action.VIEW';
 const BROWSABLE_CATEGORY = 'android.intent.category.BROWSABLE';
+const POST_MESSAGE_SERVICE = 'androidx.browser.customtabs.PostMessageService';
 
 /**
- * Adds the package visibility declarations required on Android 11+ so that
- * Android Browser Helper can discover installed browsers, Custom Tabs
- * providers and Trusted Web Activity providers.
+ * Adds the package visibility declarations required on Android 11+ and the
+ * PostMessageService used by the Custom Tabs PostMessage channel.
  */
 const withExpoTwaBridge: ConfigPlugin = (config) =>
   withAndroidManifest(config, (config) => {
@@ -50,6 +50,23 @@ const withExpoTwaBridge: ConfigPlugin = (config) =>
           },
         ],
       });
+    }
+
+    const application = manifest.application?.[0];
+    if (application) {
+      const services = (application.service ??= []);
+      if (
+        !services.some(
+          (service) => service.$['android:name'] === POST_MESSAGE_SERVICE
+        )
+      ) {
+        services.push({
+          $: {
+            'android:name': POST_MESSAGE_SERVICE,
+            'android:exported': 'true',
+          },
+        });
+      }
     }
 
     return config;
