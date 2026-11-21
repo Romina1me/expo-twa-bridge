@@ -3,12 +3,16 @@
 A strict Expo native module for opening HTTPS websites in an Android Trusted
 Web Activity (TWA) through Chrome, without a WebView.
 
-The launcher refuses to open anything other than a genuine, verified Trusted
-Web Activity. It never falls back to Expo WebBrowser, a Custom Tab, a WebView,
-or a regular browser activity.
+It only opens a genuine, verified Trusted Web Activity — Digital Asset Links
+verification happens before the browser is launched and can never be skipped.
+If the TWA cannot launch because of a browser or environment problem, it falls
+back to Android Custom Tabs with the browser chrome visible by default. It
+never uses a WebView, Expo WebBrowser, or a regular browser activity, and
+verification failures never fall back.
 
 It can also open a bidirectional `postMessage` channel on the **same**
-`CustomTabsSession` used to launch the TWA.
+`CustomTabsSession` used to launch the TWA (and, on the Custom Tabs fallback,
+the same session is used there).
 
 ## Installation
 
@@ -47,6 +51,11 @@ await ExpoTwaBridge.launch({
   displayMode: 'immersive',
   // Extra HTTPS origins that must also pass Digital Asset Links verification.
   additionalTrustedOrigins: ['https://app.example.com'],
+  // Optional: when the browser cannot host a TWA, fall back to Android Custom
+  // Tabs (chrome visible). 'custom-tabs' is the default; 'none' rejects.
+  fallback: 'custom-tabs',
+  // Optional: pin the browser package that hosts the TWA (e.g. Chrome).
+  // browserPackage: 'com.android.chrome',
   // Optional: enable the PostMessage channel.
   // sourceOrigin defaults to the URL origin, targetOrigin to sourceOrigin.
   postMessage: {
@@ -64,10 +73,15 @@ browser. It throws a `TwaLaunchError` with one of the following codes:
 | `ERR_TWA_NO_ACTIVITY`                   | No foreground Android `Activity` to launch from.                       |
 | `ERR_TWA_INVALID_URL`                   | The URL is not an absolute HTTPS URL.                                  |
 | `ERR_TWA_INVALID_DISPLAY_MODE`          | `displayMode` is not `immersive` or `default`.                         |
+| `ERR_TWA_INVALID_FALLBACK_MODE`         | `fallback` is not `custom-tabs` or `none`.                             |
 | `ERR_TWA_INVALID_ORIGIN`                | An additional origin is not an absolute HTTPS origin.                  |
 | `ERR_TWA_NO_BROWSER`                    | No browser supporting Trusted Web Activities is installed.             |
+| `ERR_TWA_BROWSER_UNAVAILABLE`           | The requested `browserPackage` is missing or has no Custom Tabs service. |
+| `ERR_TWA_CUSTOM_TABS_UNAVAILABLE`       | No browser supporting Android Custom Tabs is installed.                |
 | `ERR_TWA_VERIFICATION_FAILED`           | Digital Asset Links verification failed for an origin (missing file).  |
+| `ERR_TWA_VERIFICATION_UNAVAILABLE`      | The browser rejected the verification request.                         |
 | `ERR_TWA_VERIFICATION_TIMEOUT`          | The browser did not finish verification in time.                       |
+| `ERR_TWA_FALLBACK_FAILED`               | The Custom Tabs fallback could not be launched.                        |
 | `ERR_TWA_LAUNCH_FAILED`                 | Session setup or the TWA launch itself failed.                         |
 | `ERR_TWA_POSTMESSAGE_INVALID_ORIGIN`    | A PostMessage origin is not an absolute HTTPS origin.                  |
 | `ERR_TWA_POSTMESSAGE_VERIFICATION_FAILED` | `use_as_origin` Digital Asset Links check failed.                    |
@@ -93,24 +107,33 @@ try {
 }
 ```
 
-## Strict verification (no fallback)
+## Launch and fallback
 
-Before launching, the module:
+Before launching a TWA, the module:
 
-1. Selects a browser that advertises Trusted Web Activity support.
+1. Resolves a browser — an explicit `browserPackage`, or the system default.
 2. Binds its `CustomTabsService` and creates a single `CustomTabsSession`.
 3. Calls `CustomTabsSession.validateRelationship()` with
    `CustomTabsService.RELATION_HANDLE_ALL_URLS` for the requested origin and
    every `additionalTrustedOrigins` entry.
 4. Launches only when **all** results are `validated = true`, using
-   `TrustedWebActivityIntentBuilder`.
+   `TrustedWebActivityIntentBuilder`; the promise resolves with
+   `{ mode: 'twa' }`.
 
-There are no `fallback` or `enableFallback` options. If verification fails, no
-browser UI is opened at all; the promise rejects with
-`ERR_TWA_VERIFICATION_FAILED` (or another explicit error).
+When the browser cannot host a TWA because of a browser or environment problem
+(no TWA-capable browser, bind failure, rejected session, launch exception) and
+`fallback` is `'custom-tabs'` (the default), the same URL is opened in Android
+Custom Tabs with the browser chrome visible, and the promise resolves with
+`{ mode: 'custom-tabs' }`. Set `fallback: 'none'` to reject instead. PostMessage
+keeps working on the fallback through the same Custom Tabs session.
 
-The same session is reused for PostMessage. No second session, browser
-connection, WebView, or Custom Tab is created.
+Digital Asset Links verification failures and timeouts **never** fall back —
+the promise always rejects with `ERR_TWA_VERIFICATION_FAILED` /
+`ERR_TWA_VERIFICATION_TIMEOUT` and no browser UI is opened. A WebView, Expo
+WebBrowser, and a regular browser activity are never used.
+
+An explicit `browserPackage` is never silently replaced: if it is missing or
+cannot host a TWA, the configured `fallback` policy applies.
 
 ## Fullscreen display modes
 
