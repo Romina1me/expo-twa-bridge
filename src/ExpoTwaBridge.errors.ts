@@ -54,5 +54,21 @@ export function toTwaLaunchError(error: unknown): TwaLaunchError {
     );
   }
 
+  // Native module rejections can arrive as plain objects carrying a `code`
+  // and `message` without being an `Error` instance. Preserve the code so the
+  // module's descriptive error contract holds.
+  if (typeof error === 'object' && error !== null) {
+    const record = error as { code?: unknown; message?: unknown };
+    const code =
+      typeof record.code === 'string'
+        ? (record.code as TwaErrorCode)
+        : undefined;
+    const message =
+      typeof record.message === 'string'
+        ? (record.message as string)
+        : String(record.message ?? '');
+    return new TwaLaunchError(code ?? 'ERR_TWA_LAUNCH_FAILED', message);
+  }
+
   return new TwaLaunchError('ERR_TWA_LAUNCH_FAILED', String(error));
 }
