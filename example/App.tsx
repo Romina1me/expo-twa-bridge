@@ -12,14 +12,18 @@ import {
 } from 'react-native';
 
 import { ExpoTwaBridge, TwaLaunchError } from 'expo-twa-bridge';
+import type { TwaLaunchMode } from 'expo-twa-bridge';
 
 const DEFAULT_URL = 'https://app.figfit.ir/';
 
 export default function App() {
   const [url, setUrl] = useState(DEFAULT_URL);
   const [immersive, setImmersive] = useState(true);
+  const [allowCustomTabsFallback, setAllowCustomTabsFallback] = useState(true);
+  const [browserPackage, setBrowserPackage] = useState('');
   const [isLaunching, setIsLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [launchMode, setLaunchMode] = useState<TwaLaunchMode | null>(null);
 
   const [channelReady, setChannelReady] = useState(false);
   const [channelError, setChannelError] = useState<string | null>(null);
@@ -56,16 +60,20 @@ export default function App() {
   async function handleLaunch() {
     setIsLaunching(true);
     setError(null);
+    setLaunchMode(null);
     setChannelReady(false);
     setChannelError(null);
     setLastMessage(null);
 
     try {
-      await ExpoTwaBridge.launch({
+      const result = await ExpoTwaBridge.launch({
         url,
         displayMode: immersive ? 'immersive' : 'default',
+        fallback: allowCustomTabsFallback ? 'custom-tabs' : 'none',
+        browserPackage: browserPackage.trim() || undefined,
         postMessage: {},
       });
+      setLaunchMode(result.mode);
     } catch (launchError) {
       setError(formatError(launchError));
     } finally {
@@ -107,6 +115,25 @@ export default function App() {
           />
         </View>
 
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>Fallback to Custom Tabs</Text>
+          <Switch
+            value={allowCustomTabsFallback}
+            onValueChange={setAllowCustomTabsFallback}
+            disabled={isLaunching}
+          />
+        </View>
+
+        <TextInput
+          style={styles.input}
+          value={browserPackage}
+          onChangeText={setBrowserPackage}
+          autoCapitalize="none"
+          autoCorrect={false}
+          editable={!isLaunching}
+          placeholder="Browser package, e.g. com.android.chrome"
+        />
+
         {isLaunching ? (
           <View style={styles.loading}>
             <ActivityIndicator />
@@ -121,6 +148,12 @@ export default function App() {
         )}
 
         {error ? <Text style={styles.error}>{error}</Text> : null}
+        {launchMode ? (
+          <Text style={styles.status}>
+            Opened in:{' '}
+            {launchMode === 'twa' ? 'Trusted Web Activity' : 'Custom Tab'}
+          </Text>
+        ) : null}
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>PostMessage</Text>

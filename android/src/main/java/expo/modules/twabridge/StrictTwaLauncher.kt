@@ -9,6 +9,7 @@ import android.os.Looper
 import android.util.Log
 import androidx.browser.customtabs.CustomTabsCallback
 import androidx.browser.customtabs.CustomTabsClient
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.browser.customtabs.CustomTabsService
 import androidx.browser.customtabs.CustomTabsServiceConnection
 import androidx.browser.customtabs.CustomTabsSession
@@ -17,18 +18,27 @@ import androidx.browser.trusted.TrustedWebActivityIntentBuilder
 
 /**
  * Single owner of the CustomTabsClient/CustomTabsSession used for both the TWA
- * launch and the optional PostMessage channel.
+ * launch, the Custom Tabs fallback launch and the optional PostMessage
+ * channel.
  *
- * The TWA is only launched after `handle_all_urls` Digital Asset Links
- * verification succeeds for every requested origin. When PostMessage is
- * enabled, the same session additionally validates `use_as_origin` and opens a
- * MessagePort-backed channel after the first navigation finishes.
+ * TWA launches only happen after `handle_all_urls` Digital Asset Links
+ * verification succeeds for every requested origin. The Custom Tabs fallback
+ * skips that verification because the browser chrome is visible, so no trust
+ * relationship is needed. When PostMessage is enabled, the same session
+ * additionally validates `use_as_origin` and opens a MessagePort-backed
+ * channel after the first navigation finishes, on both surfaces.
  */
 internal class StrictTwaLauncher(private val activity: Activity) {
 
   internal interface Callback {
     fun onLaunched()
-    fun onError(code: String, message: String, cause: Throwable?)
+
+    /**
+     * @param fallbackEligible true when the failure is a browser/environment
+     * problem that the Custom Tabs fallback could work around. Verification
+     * and configuration failures are never fallback-eligible.
+     */
+    fun onError(code: String, message: String, cause: Throwable?, fallbackEligible: Boolean)
     fun onChannelReady()
     fun onChannelError(code: String, message: String)
     fun onChannelClosed()
@@ -40,6 +50,7 @@ internal class StrictTwaLauncher(private val activity: Activity) {
   private var connection: CustomTabsServiceConnection? = null
   private var session: CustomTabsSession? = null
 
+  private var providerPackage: String? = null
   private var uri: Uri? = null
   private var displayMode: TrustedWebActivityDisplayMode? = null
   private var additionalTrustedOrigins: List<String> = emptyList()
@@ -63,7 +74,8 @@ internal class StrictTwaLauncher(private val activity: Activity) {
       "ERR_TWA_VERIFICATION_TIMEOUT",
       "Digital Asset Links verification timed out. The browser did not respond within " +
         "${LAUNCH_TIMEOUT_MS / 1000} seconds.",
-      null
+      null,
+      fallbackEligible = false
     )
   }
 
@@ -125,6 +137,10 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     }
   }
 
+  /**
+   * Verified TWA launch: binds to [providerPackage], validates
+   * `handle_all_urls` for the main and additional origins, then launches.
+   */
   fun launch(
     providerPackage: String,
     uri: Uri,
@@ -134,20 +150,23 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     postMessageTargetOrigin: String?,
     callback: Callback
   ) {
-    this.uri = uri
+    prepareLaunch(
+      providerPackage,
+      uri,
+      postMessageSourceOrigin,
+      postMessageTargetOrigin,
+      callback
+    )
     this.displayMode = displayMode
     this.additionalTrustedOrigins = additionalTrustedOrigins
-    this.postMessageSourceOrigin = postMessageSourceOrigin
-    this.postMessageTargetOrigin = postMessageTargetOrigin
-    this.callback = callback
-    this.pendingLaunchOrigins = mutableSetOf()
 
     val mainOrigin = originOf(uri)
     if (mainOrigin == null) {
       failLaunch(
         "ERR_TWA_INVALID_URL",
         "Only absolute HTTPS URLs can be opened in a Trusted Web Activity.",
-        null
+        null,
+        fallbackEligible = false
       )
       return
     }
@@ -155,112 +174,53 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     pendingLaunchOrigins.add(mainOrigin)
     pendingLaunchOrigins.addAll(additionalTrustedOrigins)
 
-    val serviceConnection = object : CustomTabsServiceConnection() {
-      override fun onCustomTabsServiceConnected(name: ComponentName, client: CustomTabsClient) {
-        if (launchSettled) {
-          return
-        }
-
-        try {
-          if (!client.warmup(0)) {
-            failLaunch(
-              "ERR_TWA_LAUNCH_FAILED",
-              "The browser rejected the Custom Tabs warmup request.",
-              null
-            )
-            return
-          }
-
-          val newSession = client.newSession(sessionCallback)
-          if (newSession == null) {
-            failLaunch(
-              "ERR_TWA_LAUNCH_FAILED",
-              "The browser could not create a Custom Tabs session.",
-              null
-            )
-            return
-          }
-          session = newSession
-
-          for (origin in pendingLaunchOrigins.toList()) {
-            val submitted = newSession.validateRelationship(
-              CustomTabsService.RELATION_HANDLE_ALL_URLS,
-              Uri.parse(origin),
-              null
-            )
-            if (!submitted) {
-              failLaunch(
-                "ERR_TWA_LAUNCH_FAILED",
-                "The browser rejected Digital Asset Links verification for $origin.",
-                null
-              )
-              return
-            }
-          }
-
-          if (isPostMessageEnabled()) {
-            val sourceOrigin = postMessageSourceOrigin ?: return
-            val submitted = newSession.validateRelationship(
-              CustomTabsService.RELATION_USE_AS_ORIGIN,
-              Uri.parse(sourceOrigin),
-              null
-            )
-            if (!submitted) {
-              emitChannelError(
-                "ERR_TWA_POSTMESSAGE_UNAVAILABLE",
-                "The browser rejected PostMessage origin validation for $sourceOrigin.",
-                null
-              )
-            }
-          }
-        } catch (error: Exception) {
+    connect(providerPackage) { newSession ->
+      for (origin in pendingLaunchOrigins.toList()) {
+        val submitted = newSession.validateRelationship(
+          CustomTabsService.RELATION_HANDLE_ALL_URLS,
+          Uri.parse(origin),
+          null
+        )
+        if (!submitted) {
           failLaunch(
-            "ERR_TWA_LAUNCH_FAILED",
-            error.message ?: "The Trusted Web Activity could not be prepared.",
-            error
+            "ERR_TWA_VERIFICATION_UNAVAILABLE",
+            "The browser rejected the Digital Asset Links verification request for $origin.",
+            null,
+            fallbackEligible = false
           )
+          return@connect
         }
       }
-
-      override fun onServiceDisconnected(name: ComponentName) {
-        if (!launchSettled) {
-          failLaunch(
-            "ERR_TWA_NO_BROWSER",
-            "The Trusted Web Activity browser disconnected before verification completed.",
-            null
-          )
-          return
-        }
-
-        session = null
-        channelReady = false
-        emitChannelClosed()
-      }
-    }
-
-    connection = serviceConnection
-
-    val bound = try {
-      CustomTabsClient.bindCustomTabsService(activity, providerPackage, serviceConnection)
-    } catch (error: Exception) {
-      failLaunch(
-        "ERR_TWA_LAUNCH_FAILED",
-        error.message ?: "Could not bind to the Trusted Web Activity browser service.",
-        error
-      )
-      return
-    }
-
-    if (!bound) {
-      failLaunch(
-        "ERR_TWA_NO_BROWSER",
-        "Could not connect to the Trusted Web Activity browser service.",
-        null
-      )
-      return
+      submitPostMessageValidation(newSession)
     }
 
     handler.postDelayed(launchTimeoutRunnable, LAUNCH_TIMEOUT_MS)
+  }
+
+  /**
+   * Custom Tabs fallback launch: binds to [providerPackage] and opens the URL
+   * with visible browser chrome. PostMessage uses the same session machinery
+   * as the TWA launch, so the channel keeps working on this surface.
+   */
+  fun launchCustomTabs(
+    providerPackage: String,
+    uri: Uri,
+    postMessageSourceOrigin: String?,
+    postMessageTargetOrigin: String?,
+    callback: Callback
+  ) {
+    prepareLaunch(
+      providerPackage,
+      uri,
+      postMessageSourceOrigin,
+      postMessageTargetOrigin,
+      callback
+    )
+
+    connect(providerPackage) { newSession ->
+      submitPostMessageValidation(newSession)
+      openCustomTab(newSession, uri)
+    }
   }
 
   /**
@@ -295,6 +255,163 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     callback = null
   }
 
+  private fun prepareLaunch(
+    providerPackage: String,
+    uri: Uri,
+    postMessageSourceOrigin: String?,
+    postMessageTargetOrigin: String?,
+    callback: Callback
+  ) {
+    this.providerPackage = providerPackage
+    this.uri = uri
+    this.displayMode = null
+    this.additionalTrustedOrigins = emptyList()
+    this.postMessageSourceOrigin = postMessageSourceOrigin
+    this.postMessageTargetOrigin = postMessageTargetOrigin
+    this.callback = callback
+    this.pendingLaunchOrigins = mutableSetOf()
+    this.navigationFinished = false
+    this.channelRequested = false
+  }
+
+  /**
+   * Binds the browser's Custom Tabs service and hands a ready session to
+   * [onSession]. Bind, warmup and session creation failures reject the launch
+   * as fallback-eligible browser problems.
+   */
+  private fun connect(providerPackage: String, onSession: (CustomTabsSession) -> Unit) {
+    val serviceConnection = object : CustomTabsServiceConnection() {
+      override fun onCustomTabsServiceConnected(name: ComponentName, client: CustomTabsClient) {
+        if (launchSettled) {
+          return
+        }
+
+        try {
+          if (!client.warmup(0)) {
+            failLaunch(
+              "ERR_TWA_LAUNCH_FAILED",
+              "The browser rejected the Custom Tabs warmup request.",
+              null,
+              fallbackEligible = true
+            )
+            return
+          }
+
+          val newSession = client.newSession(sessionCallback)
+          if (newSession == null) {
+            failLaunch(
+              "ERR_TWA_LAUNCH_FAILED",
+              "The browser could not create a Custom Tabs session.",
+              null,
+              fallbackEligible = true
+            )
+            return
+          }
+          session = newSession
+
+          onSession(newSession)
+        } catch (error: Exception) {
+          failLaunch(
+            "ERR_TWA_LAUNCH_FAILED",
+            error.message ?: "The Trusted Web Activity could not be prepared.",
+            error,
+            fallbackEligible = true
+          )
+        }
+      }
+
+      override fun onServiceDisconnected(name: ComponentName) {
+        if (!launchSettled) {
+          failLaunch(
+            "ERR_TWA_NO_BROWSER",
+            "The browser disconnected before the launch completed.",
+            null,
+            fallbackEligible = true
+          )
+          return
+        }
+
+        session = null
+        channelReady = false
+        emitChannelClosed()
+      }
+    }
+
+    connection = serviceConnection
+
+    val bound = try {
+      CustomTabsClient.bindCustomTabsService(activity, providerPackage, serviceConnection)
+    } catch (error: Exception) {
+      failLaunch(
+        "ERR_TWA_LAUNCH_FAILED",
+        error.message ?: "Could not bind to the browser's Custom Tabs service.",
+        error,
+        fallbackEligible = true
+      )
+      return
+    }
+
+    if (!bound) {
+      failLaunch(
+        "ERR_TWA_NO_BROWSER",
+        "Could not connect to the browser's Custom Tabs service.",
+        null,
+        fallbackEligible = true
+      )
+    }
+  }
+
+  private fun openCustomTab(currentSession: CustomTabsSession, uri: Uri) {
+    val providerPackage = providerPackage ?: run {
+      failLaunch(
+        "ERR_TWA_FALLBACK_FAILED",
+        "The Custom Tabs fallback has no target browser package.",
+        null,
+        fallbackEligible = false
+      )
+      return
+    }
+
+    try {
+      val customTabsIntent = CustomTabsIntent.Builder(currentSession).build()
+      customTabsIntent.intent.setPackage(providerPackage)
+      customTabsIntent.launchUrl(activity, uri)
+
+      launchSettled = true
+      callback?.onLaunched()
+
+      if (isPostMessageEnabled()) {
+        handler.postDelayed(channelTimeoutRunnable, CHANNEL_TIMEOUT_MS)
+      }
+    } catch (error: Exception) {
+      failLaunch(
+        "ERR_TWA_FALLBACK_FAILED",
+        error.message ?: "The Custom Tabs fallback could not be launched.",
+        error,
+        fallbackEligible = false
+      )
+    }
+  }
+
+  private fun submitPostMessageValidation(currentSession: CustomTabsSession) {
+    if (!isPostMessageEnabled()) {
+      return
+    }
+    val sourceOrigin = postMessageSourceOrigin ?: return
+    val submitted = currentSession.validateRelationship(
+      CustomTabsService.RELATION_USE_AS_ORIGIN,
+      Uri.parse(sourceOrigin),
+      null
+    )
+    if (!submitted) {
+      emitChannelError(
+        "ERR_TWA_POSTMESSAGE_UNAVAILABLE",
+        "The browser rejected PostMessage origin validation for $sourceOrigin.",
+        null
+      )
+    }
+  }
+
   private fun handleLaunchValidation(origin: String, validated: Boolean) {
     if (launchSettled) {
       return
@@ -312,7 +429,8 @@ internal class StrictTwaLauncher(private val activity: Activity) {
           "$origin/.well-known/assetlinks.json with this app's package name and " +
           "signing certificate SHA-256 for the " +
           "delegate_permission/common.handle_all_urls relation.",
-        null
+        null,
+        fallbackEligible = false
       )
       return
     }
@@ -398,12 +516,14 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     val uri = uri
     val displayMode = displayMode
     val currentSession = session
+    val providerPackage = providerPackage
 
-    if (uri == null || displayMode == null || currentSession == null) {
+    if (uri == null || displayMode == null || currentSession == null || providerPackage == null) {
       failLaunch(
         "ERR_TWA_LAUNCH_FAILED",
         "The Trusted Web Activity could not be prepared.",
-        null
+        null,
+        fallbackEligible = true
       )
       return
     }
@@ -414,7 +534,10 @@ internal class StrictTwaLauncher(private val activity: Activity) {
         builder.setAdditionalTrustedOrigins(additionalTrustedOrigins)
       }
 
-      builder.build(currentSession).launchTrustedWebActivity(activity)
+      val intent = builder.build(currentSession)
+      // Route the launch to the verified provider instead of the system default.
+      intent.intent.setPackage(providerPackage)
+      intent.launchTrustedWebActivity(activity)
 
       launchSettled = true
       handler.removeCallbacks(launchTimeoutRunnable)
@@ -427,7 +550,8 @@ internal class StrictTwaLauncher(private val activity: Activity) {
       failLaunch(
         "ERR_TWA_LAUNCH_FAILED",
         error.message ?: "The Trusted Web Activity could not be launched.",
-        error
+        error,
+        fallbackEligible = true
       )
     }
   }
@@ -458,7 +582,12 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     callback?.onChannelClosed()
   }
 
-  private fun failLaunch(code: String, message: String, cause: Throwable?) {
+  private fun failLaunch(
+    code: String,
+    message: String,
+    cause: Throwable?,
+    fallbackEligible: Boolean
+  ) {
     if (launchSettled) {
       return
     }
@@ -470,7 +599,7 @@ internal class StrictTwaLauncher(private val activity: Activity) {
 
     // Keep the callback alive: PostMessage validation results may still be
     // delivered after the launch itself has failed, and they must reach JS.
-    callback?.onError(code, message, cause)
+    callback?.onError(code, message, cause, fallbackEligible)
   }
 
   private fun unbind() {

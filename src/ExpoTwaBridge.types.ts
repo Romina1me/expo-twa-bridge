@@ -1,5 +1,20 @@
 export type TwaDisplayMode = 'default' | 'immersive';
 
+/**
+ * What to do when a Trusted Web Activity cannot be launched because of a
+ * browser or environment problem.
+ */
+export type TwaFallbackMode = 'custom-tabs' | 'none';
+
+/**
+ * Surface that actually opened the URL.
+ */
+export type TwaLaunchMode = 'twa' | 'custom-tabs';
+
+export type TwaLaunchResult = {
+  mode: TwaLaunchMode;
+};
+
 export type TwaPostMessageOptions = {
   /**
    * App origin used as the source of PostMessage communication. Must be
@@ -18,11 +33,7 @@ export type TwaPostMessageOptions = {
 
 export type TwaLaunchOptions = {
   /**
-   * Absolute HTTPS URL to open in the Trusted Web Activity.
-   *
-   * The origin must pass Digital Asset Links verification for this app.
-   * Launching rejects with `ERR_TWA_VERIFICATION_FAILED` otherwise; no
-   * Custom Tab, WebView or browser fallback is used.
+   * Absolute HTTPS URL to open.
    */
   url: string;
   /**
@@ -33,6 +44,30 @@ export type TwaLaunchOptions = {
    */
   displayMode?: TwaDisplayMode;
   /**
+   * What to do when the Trusted Web Activity cannot launch because of a
+   * browser or environment problem (no TWA-capable browser, bind failure,
+   * rejected session, launch exception):
+   *
+   * - `custom-tabs` (default): open the same URL in Android Custom Tabs with
+   *   the browser chrome visible. PostMessage keeps working through the same
+   *   Custom Tabs session.
+   * - `none`: reject with a descriptive error.
+   *
+   * Digital Asset Links verification failures and timeouts never fall back —
+   * they always reject with `ERR_TWA_VERIFICATION_FAILED` /
+   * `ERR_TWA_VERIFICATION_TIMEOUT`.
+   */
+  fallback?: TwaFallbackMode;
+  /**
+   * Preferred browser package used to host the Trusted Web Activity (for
+   * example `com.android.chrome`). When omitted, Android's browser selection
+   * picks the provider.
+   *
+   * The package is never silently replaced: if it is missing or cannot host a
+   * TWA, the configured `fallback` policy applies.
+   */
+  browserPackage?: string;
+  /**
    * Extra HTTPS origins verified for this app that should also be shown
    * without browser controls when navigated to from `url`.
    *
@@ -41,7 +76,8 @@ export type TwaLaunchOptions = {
    */
   additionalTrustedOrigins?: string[];
   /**
-   * Enables a PostMessage channel on the same TWA session.
+   * Enables a PostMessage channel on the same browser session, including when
+   * the Custom Tabs fallback is used.
    *
    * The channel is requested after the first navigation finishes. Listen for
    * `onChannelReady` before calling `postMessage()`.

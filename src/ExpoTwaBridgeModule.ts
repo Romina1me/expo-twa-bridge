@@ -8,7 +8,9 @@ import {
 } from './ExpoTwaBridge.errors';
 import type {
   TwaChannelErrorEvent,
+  TwaLaunchMode,
   TwaLaunchOptions,
+  TwaLaunchResult,
   TwaMessageEvent,
 } from './ExpoTwaBridge.types';
 
@@ -23,11 +25,13 @@ declare class ExpoTwaBridgeNativeModule extends NativeModule<ExpoTwaBridgeModule
   launch(
     url: string,
     displayMode: string,
+    fallback: string,
+    browserPackage: string | null,
     additionalTrustedOrigins: string[],
     enablePostMessage: boolean,
     postMessageSourceOrigin: string | null,
     postMessageTargetOrigin: string | null
-  ): Promise<void>;
+  ): Promise<string>;
   postMessage(message: string): Promise<void>;
   isPostMessageReady(): Promise<boolean>;
 }
@@ -35,14 +39,28 @@ declare class ExpoTwaBridgeNativeModule extends NativeModule<ExpoTwaBridgeModule
 const ExpoTwaBridgeModule =
   requireNativeModule<ExpoTwaBridgeNativeModule>('ExpoTwaBridge');
 
+function parseLaunchMode(value: string): TwaLaunchMode {
+  if (value === 'twa' || value === 'custom-tabs') {
+    return value;
+  }
+  throw new TwaLaunchError(
+    'ERR_TWA_LAUNCH_FAILED',
+    `The native module returned an unknown launch mode "${value}".`
+  );
+}
+
 export const ExpoTwaBridge = {
   /**
    * Opens the given HTTPS URL in an Android Trusted Web Activity.
    *
-   * The call resolves only after Digital Asset Links verification succeeds
-   * for the URL's origin (and every additional trusted origin). Otherwise it
-   * throws a {@link TwaLaunchError} — no Custom Tab, WebView or browser
-   * fallback is ever used.
+   * The call resolves with the surface that actually opened the URL. A TWA
+   * resolves only after Digital Asset Links verification succeeds for the
+   * URL's origin (and every additional trusted origin).
+   *
+   * When the TWA cannot launch because of a browser or environment problem
+   * and `fallback` is `'custom-tabs'` (the default), the URL is opened in
+   * Android Custom Tabs instead and the result is `{ mode: 'custom-tabs' }`.
+   * Verification failures and timeouts never fall back.
    *
    * @throws {TwaLaunchError} with code `ERR_TWA_VERIFICATION_FAILED` when the
    * website does not publish a valid `.well-known/assetlinks.json`.
@@ -50,26 +68,36 @@ export const ExpoTwaBridge = {
   async launch({
     url,
     displayMode = 'immersive',
+    fallback = 'custom-tabs',
+    browserPackage,
     additionalTrustedOrigins = [],
     postMessage,
-  }: TwaLaunchOptions): Promise<void> {
+  }: TwaLaunchOptions): Promise<TwaLaunchResult> {
     try {
-      await ExpoTwaBridgeModule.launch(
+      const mode = await ExpoTwaBridgeModule.launch(
         url,
         displayMode,
+        fallback,
+        browserPackage && browserPackage.trim().length > 0
+          ? browserPackage.trim()
+          : null,
         additionalTrustedOrigins,
         postMessage !== undefined,
         postMessage?.sourceOrigin ?? null,
         postMessage?.targetOrigin ?? null
       );
+      return { mode: parseLaunchMode(mode) };
     } catch (error) {
       throw toTwaLaunchError(error);
     }
   },
 
   /**
-   * Sends a raw string to the verified web page over the TWA PostMessage
+   * Sends a raw string to the verified web page over the PostMessage
    * channel. The channel must be ready; listen for `onChannelReady` first.
+   *
+   * The channel is backed by the browser session, so it also works when the
+   * Custom Tabs fallback opened the URL.
    */
   async postMessage(message: string): Promise<void> {
     try {

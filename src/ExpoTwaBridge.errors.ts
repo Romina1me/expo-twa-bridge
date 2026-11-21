@@ -2,9 +2,14 @@ export type TwaErrorCode =
   | 'ERR_TWA_NO_ACTIVITY'
   | 'ERR_TWA_INVALID_URL'
   | 'ERR_TWA_INVALID_DISPLAY_MODE'
+  | 'ERR_TWA_INVALID_FALLBACK_MODE'
   | 'ERR_TWA_INVALID_ORIGIN'
   | 'ERR_TWA_NO_BROWSER'
+  | 'ERR_TWA_BROWSER_UNAVAILABLE'
+  | 'ERR_TWA_CUSTOM_TABS_UNAVAILABLE'
+  | 'ERR_TWA_FALLBACK_FAILED'
   | 'ERR_TWA_VERIFICATION_FAILED'
+  | 'ERR_TWA_VERIFICATION_UNAVAILABLE'
   | 'ERR_TWA_VERIFICATION_TIMEOUT'
   | 'ERR_TWA_LAUNCH_FAILED'
   | 'ERR_TWA_POSTMESSAGE_INVALID_ORIGIN'
@@ -20,6 +25,11 @@ export type TwaErrorCode =
  *
  * Digital Asset Links verification failures are thrown as
  * `ERR_TWA_VERIFICATION_FAILED`; the TWA never opens in that case.
+ *
+ * `ERR_TWA_NO_BROWSER`, `ERR_TWA_BROWSER_UNAVAILABLE`,
+ * `ERR_TWA_CUSTOM_TABS_UNAVAILABLE` and `ERR_TWA_FALLBACK_FAILED` describe
+ * browser/environment problems; with `fallback: 'custom-tabs'` the launch is
+ * retried in Android Custom Tabs before these are reported.
  */
 export class TwaLaunchError extends Error {
   readonly code: TwaErrorCode;
