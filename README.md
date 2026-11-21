@@ -3,12 +3,12 @@
 A strict Expo native module for opening HTTPS websites in an Android Trusted
 Web Activity (TWA) through Chrome, without a WebView.
 
-It only opens a genuine, verified Trusted Web Activity — Digital Asset Links
-verification happens before the browser is launched and can never be skipped.
-If the TWA cannot launch because of a browser or environment problem, it falls
-back to Android Custom Tabs with the browser chrome visible by default. It
-never uses a WebView, Expo WebBrowser, or a regular browser activity, and
-verification failures never fall back.
+The package attempts to launch a genuine, verified Trusted Web Activity:
+Digital Asset Links verification happens before the browser is launched and
+can never be skipped. If the browser cannot host a TWA, it may instead open the
+URL in Android Custom Tabs with the browser chrome visible when the Custom Tabs
+fallback is enabled (the default). It never uses a WebView, Expo WebBrowser, or
+a regular browser activity, and verification failures never fall back.
 
 It can also open a bidirectional `postMessage` channel on the **same**
 `CustomTabsSession` used to launch the TWA (and, on the Custom Tabs fallback,
@@ -78,7 +78,7 @@ browser. It throws a `TwaLaunchError` with one of the following codes:
 | `ERR_TWA_NO_BROWSER`                    | No browser supporting Trusted Web Activities is installed.             |
 | `ERR_TWA_BROWSER_UNAVAILABLE`           | The requested `browserPackage` is missing or has no Custom Tabs service. |
 | `ERR_TWA_CUSTOM_TABS_UNAVAILABLE`       | No browser supporting Android Custom Tabs is installed.                |
-| `ERR_TWA_VERIFICATION_FAILED`           | Digital Asset Links verification failed for an origin (missing file).  |
+| `ERR_TWA_VERIFICATION_FAILED`           | Digital Asset Links verification failed for the requested origin.      |
 | `ERR_TWA_VERIFICATION_UNAVAILABLE`      | The browser rejected the verification request.                         |
 | `ERR_TWA_VERIFICATION_TIMEOUT`          | The browser did not finish verification in time.                       |
 | `ERR_TWA_FALLBACK_FAILED`               | The Custom Tabs fallback could not be launched.                        |
@@ -101,7 +101,8 @@ try {
     error instanceof TwaLaunchError &&
     error.code === 'ERR_TWA_VERIFICATION_FAILED'
   ) {
-    // The site does not publish a valid assetlinks.json. Nothing was opened.
+    // Digital Asset Links verification failed for the requested origin.
+    // Nothing was opened.
     console.warn(error.message);
   }
 }
@@ -120,6 +121,12 @@ Before launching a TWA, the module:
    `TrustedWebActivityIntentBuilder`; the promise resolves with
    `{ mode: 'twa' }`.
 
+`validateRelationship()` is resolved by the browser, which fetches the origin's
+`assetlinks.json` and checks that this app's package name and signing
+certificate SHA-256 appear for the `handle_all_urls` relation. That browser-side
+check is what establishes the app-to-origin relationship before anything is
+opened.
+
 When the browser cannot host a TWA because of a browser or environment problem
 (no TWA-capable browser, bind failure, rejected session, launch exception) and
 `fallback` is `'custom-tabs'` (the default), the same URL is opened in Android
@@ -134,6 +141,29 @@ WebBrowser, and a regular browser activity are never used.
 
 An explicit `browserPackage` is never silently replaced: if it is missing or
 cannot host a TWA, the configured `fallback` policy applies.
+
+`launch()` resolves with the surface that actually opened the URL:
+
+```ts
+import { ExpoTwaBridge } from 'expo-twa-bridge';
+
+const { mode } = await ExpoTwaBridge.launch({ url: 'https://example.com' });
+// mode: 'twa' | 'custom-tabs'
+
+if (mode === 'twa') {
+  // A verified fullscreen Trusted Web Activity, browser chrome hidden.
+  onTwaOpened();
+} else {
+  // The Custom Tabs fallback opened the URL with the browser UI visible.
+  // This is not a verified fullscreen TWA.
+  onFallbackOpened();
+}
+```
+
+Whenever `mode` is `'custom-tabs'`, the browser UI is visible and the session is
+**not** a verified fullscreen TWA — the fallback was used only because the
+browser could not host a TWA. Set `fallback: 'none'` if a non-fullscreen surface
+must never be opened.
 
 ## Fullscreen display modes
 
@@ -155,6 +185,12 @@ configuration separately.
 PostMessage runs over the existing TWA session and requires browser
 verification with the `delegate_permission/common.use_as_origin` Digital Asset
 Links relation.
+
+`additionalTrustedOrigins` controls which origins the **TWA may navigate to**
+(each must pass `handle_all_urls` verification); it does **not** enable
+PostMessage for those origins. The current PostMessage implementation supports
+only the configured `sourceOrigin` / `targetOrigin` pair (both default to the
+URL origin). PostMessage on additional trusted origins is not supported.
 
 ### JavaScript API
 
@@ -207,7 +243,9 @@ as events.
 
 ### Web page side
 
-The page must accept the first message and keep the provided `MessagePort`:
+Trusted Web Activity PostMessage hands the page a `MessagePort` from the
+verified native app. The page must accept the first message and keep the
+provided port:
 
 ```js
 window.addEventListener('message', (event) => {
@@ -215,23 +253,58 @@ window.addEventListener('message', (event) => {
   if (!port) return;
 
   port.onmessage = (messageEvent) => {
-    const message = messageEvent.data;
-
-    if (message === 'PING') {
-      port.postMessage('PONG');
+    let frame;
+    try {
+      frame = JSON.parse(messageEvent.data);
+    } catch {
+      return; // Not one of our envelopes.
     }
+    // React only to messages that match the expected app protocol.
+    if (frame.type !== 'PING') return;
+    port.postMessage(JSON.stringify({ type: 'PONG' }));
   };
 
   // Native → Web initial message.
-  port.postMessage('PING');
+  port.postMessage(JSON.stringify({ type: 'PING' }));
 });
 ```
+
+Do not treat every `message` event as coming from the native bridge just because
+`event.ports[0]` is present: the page may also receive unrelated `postMessage`
+events (for example from its own scripts or embeds) on the same `window`.
+Neither checking `event.ports[0]` nor matching a message type authenticates the
+sender — the envelope in the example only gates on an application-level
+protocol, it does not prove which app (or other caller) produced a message.
+Treat every received message as untrusted application data.
+
+Also, do not rely on `event.origin` to authenticate the native sender on this
+handshake: the TWA PostMessage handshake does not guarantee that `event.origin`
+reflects the app origin (Chromium may report an opaque or empty origin), so an
+`event.origin` check would be misleading rather than secure. Prefer the
+application-level envelope.
+
+The real identity relationship is established by Digital Asset Links. Before the
+channel is opened, the browser verifies
+`delegate_permission/common.use_as_origin` for the configured source origin
+against the app's `assetlinks.json` (see the channel steps above). That relation
+binds this application (identified by its Android package name and signing
+certificate SHA-256 fingerprint) to the configured origin, telling the browser
+it may open a message channel for that origin. It verifies the
+application-to-origin relationship; it does not authenticate individual
+messages, and the web page cannot re-derive that identity from a message.
+
+Finally, because the channel lives in the page's origin, any script that runs in
+that origin can read and send bridge messages. Avoid loading untrusted or
+third-party scripts into a page that uses this bridge — the bridge capability is
+effectively exposed to the page's code.
 
 ## Requirements
 
 - Android only.
 - Chrome or another browser that supports Trusted Web Activities.
-- Chrome 115+ for TWA PostMessage.
+- TWA PostMessage additionally requires a browser that supports the TWA
+  PostMessage API (for example Chrome 115+). Verifying the TWA does not imply
+  the browser also supports PostMessage.
 - The page must be served over HTTPS.
 - The website must verify the app through
   [Digital Asset Links](https://developers.google.com/digital-asset-links):
@@ -277,8 +350,23 @@ Verification is performed by the browser against the live origin. If Chrome
 returns `404` for `assetlinks.json`, the module reports
 `ERR_TWA_VERIFICATION_FAILED` for that origin.
 
+Common causes of `ERR_TWA_VERIFICATION_FAILED`:
+
+- Missing or inaccessible `assetlinks.json` at `/.well-known/assetlinks.json`
+  (HTTP 404/403, or unreachable from the device).
+- Incorrect Android package name in `target.package_name`.
+- Incorrect signing certificate SHA-256 fingerprint in
+  `target.sha256_cert_fingerprints` (debug and release builds usually have
+  different keys).
+- Missing the required Digital Asset Links relation
+  (`delegate_permission/common.handle_all_urls`, and
+  `delegate_permission/common.use_as_origin` when PostMessage is enabled).
+
 ## Limitations
 
+- PostMessage is limited to the single configured `sourceOrigin` / `targetOrigin`
+  pair; `additionalTrustedOrigins` does not create PostMessage channels for
+  those origins.
 - The TWA page must be on an origin verified with `handle_all_urls`; PostMessage
   additionally requires `use_as_origin`.
 - The channel is created once per launch, after the first navigation finishes.

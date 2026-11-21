@@ -8,6 +8,8 @@
 - Strict Digital Asset Links verification (`handle_all_urls`) for the URL and
   every `additionalTrustedOrigins` entry before launching; verification
   failures and timeouts never fall back.
+- Fullscreen display modes: `immersive` (default) hides browser controls and
+  Android system bars; `default` keeps the system bars visible.
 - Optional custom-tabs fallback (`fallback: 'custom-tabs'`, the default) for
   browser/environment launch failures, with `fallback: 'none'` to reject.
 - Optional `browserPackage` to pin the hosting browser.
