@@ -52,6 +52,14 @@ node_modules/
 npm-debug.log
 yarn-debug.log
 yarn-error.log
+*.tsbuildinfo
 
 # Expo
 .expo/*
+example/android/
+example/dist*/
+
+# Signing (never commit keystores or credentials)
+*.keystore
+!debug.keystore
+keystore.properties

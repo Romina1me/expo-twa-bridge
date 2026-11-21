@@ -5,7 +5,15 @@
       "Shell(ls E:\\figfit\\expo-twa-bridge\\node_modules 2>nul | find /c \".\" & dir E:\\figfit\\expo-twa-bridge\\node_modules /b 2>nul | findstr /i \"expo$ react-native$\")",
       "Shell(if:*)",
       "Shell(else:*)",
-      "powershell"
+      "powershell",
+      "Shell(node -e \"const p=require('expo/config-plugins'); console.log(Object.keys(p).filter(k=>/Manifest|withAndroid/.test(k)).join('\\n'))\")",
+      "Shell(node -p \"require('@expo/config-plugins/package.json').version\")",
+      "Shell(node -e \"const p=require('expo/config-plugins'); console.log(typeof p.withAndroidManifest)\")",
+      "Shell(=C:\\Users\\Asus\\AppData\\Local\\Temp\\commandcode\\shellout\\2026-11-19T13-15-53-157Z-s01ofesc.log:*)",
+      "Shell(Get-Content:*)",
+      "Shell(Out-String:*)",
+      "Shell(Get-ChildItem:*)",
+      "Shell(Select-Object:*)"
     ],
     "deny": [],
     "defaultMode": "default"
