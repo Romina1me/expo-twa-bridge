@@ -1,5 +1,3 @@
-/* eslint-env jest */
-
 import { Image } from 'react-native';
 
 import { ExpoTwaBridge, TwaLaunchError } from '../ExpoTwaBridgeModule';
