@@ -1,5 +1,6 @@
 import { NativeModule, requireNativeModule } from 'expo';
 import type { EventSubscription } from 'expo';
+import { Image } from 'react-native';
 
 import {
   TwaLaunchError,
@@ -28,9 +29,17 @@ declare class ExpoTwaBridgeNativeModule extends NativeModule<ExpoTwaBridgeModule
     fallback: string,
     browserPackage: string | null,
     additionalTrustedOrigins: string[],
-    enablePostMessage: boolean,
-    postMessageSourceOrigin: string | null,
-    postMessageTargetOrigin: string | null
+    options: {
+      postMessage: {
+        sourceOrigin: string | null;
+        targetOrigin: string | null;
+      } | null;
+      splashScreen: {
+        image: string;
+        backgroundColor: string | null;
+      } | null;
+    } | null,
+    verification: string
   ): Promise<string>;
   postMessage(message: string): Promise<void>;
   isPostMessageReady(): Promise<boolean>;
@@ -49,44 +58,96 @@ function parseLaunchMode(value: string): TwaLaunchMode {
   );
 }
 
+function resolveSplashImage(image: string | number): string {
+  if (typeof image === 'string') {
+    const trimmed = image.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  } else {
+    const resolved = Image.resolveAssetSource(image);
+    if (resolved?.uri) {
+      return resolved.uri;
+    }
+  }
+  throw new TwaLaunchError(
+    'ERR_TWA_INVALID_SPLASH_SCREEN',
+    'splashScreen.image could not be resolved to an image URI.'
+  );
+}
+
 export const ExpoTwaBridge = {
   /**
    * Opens the given HTTPS URL in an Android Trusted Web Activity.
    *
-   * The call resolves with the surface that actually opened the URL. A TWA
-   * resolves only after Digital Asset Links verification succeeds for the
-   * URL's origin (and every additional trusted origin).
+   * The call resolves with the surface that actually opened the URL.
    *
-   * When the TWA cannot launch because of a browser or environment problem
-   * and `fallback` is `'custom-tabs'` (the default), the URL is opened in
-   * Android Custom Tabs instead and the result is `{ mode: 'custom-tabs' }`.
-   * Verification failures and timeouts never fall back.
+   * - `verification: 'permissive'` (default) launches the TWA intent even when
+   *   verification cannot be confirmed. Chrome runs its own Digital Asset Links
+   *   check and decides whether to show the URL fullscreen or with browser UI.
+   *   The result is `verified: false`.
+   * - `verification: 'strict'` resolves only after every requested origin
+   *   passed Digital Asset Links verification. Failures and timeouts reject and
+   *   never fall back. A strict TWA result is `verified: true`.
    *
-   * @throws {TwaLaunchError} with code `ERR_TWA_VERIFICATION_FAILED` when the
+   * When the TWA cannot launch because of a browser or environment problem and
+   * `fallback` is `'custom-tabs'` (the default), the URL is opened in Android
+   * Custom Tabs instead and the result is `{ mode: 'custom-tabs' }`.
+   *
+   * @throws {TwaLaunchError} in `strict` mode with
+   * `ERR_TWA_VERIFICATION_FAILED` / `ERR_TWA_VERIFICATION_TIMEOUT` when the
    * website does not publish a valid `.well-known/assetlinks.json`.
    */
   async launch({
     url,
+    verification = 'permissive',
     displayMode = 'immersive',
     fallback = 'custom-tabs',
     browserPackage,
     additionalTrustedOrigins = [],
+    splashScreen,
     postMessage,
   }: TwaLaunchOptions): Promise<TwaLaunchResult> {
     try {
-      const mode = await ExpoTwaBridgeModule.launch(
-        url,
-        displayMode,
-        fallback,
-        browserPackage && browserPackage.trim().length > 0
-          ? browserPackage.trim()
-          : null,
-        additionalTrustedOrigins,
-        postMessage !== undefined,
-        postMessage?.sourceOrigin ?? null,
-        postMessage?.targetOrigin ?? null
+      const postMessageOptions =
+        postMessage === undefined
+          ? null
+          : {
+              sourceOrigin: postMessage.sourceOrigin ?? null,
+              targetOrigin: postMessage.targetOrigin ?? null,
+            };
+      const splashScreenOptions =
+        splashScreen === undefined
+          ? null
+          : {
+              image: resolveSplashImage(splashScreen.image),
+              backgroundColor: splashScreen.backgroundColor ?? null,
+            };
+      const options =
+        postMessageOptions === null && splashScreenOptions === null
+          ? null
+          : {
+              postMessage: postMessageOptions,
+              splashScreen: splashScreenOptions,
+            };
+
+      const mode = parseLaunchMode(
+        await ExpoTwaBridgeModule.launch(
+          url,
+          displayMode,
+          fallback,
+          browserPackage && browserPackage.trim().length > 0
+            ? browserPackage.trim()
+            : null,
+          additionalTrustedOrigins,
+          options,
+          verification
+        )
       );
-      return { mode: parseLaunchMode(mode) };
+      return {
+        mode,
+        verified: verification === 'strict' && mode === 'twa',
+      };
     } catch (error) {
       throw toTwaLaunchError(error);
     }

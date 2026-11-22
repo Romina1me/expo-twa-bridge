@@ -5,7 +5,9 @@
   "main": "index.ts",
   "scripts": {
     "android": "expo run:android",
+    "preandroid": "npm --prefix .. run sync:example",
     "start": "expo start",
+    "prestart": "npm --prefix .. run sync:example",
     "prebuild": "expo prebuild"
   },
   "dependencies": {

@@ -3,6 +3,8 @@ export type TwaErrorCode =
   | 'ERR_TWA_INVALID_URL'
   | 'ERR_TWA_INVALID_DISPLAY_MODE'
   | 'ERR_TWA_INVALID_FALLBACK_MODE'
+  | 'ERR_TWA_INVALID_VERIFICATION_MODE'
+  | 'ERR_TWA_INVALID_SPLASH_SCREEN'
   | 'ERR_TWA_INVALID_ORIGIN'
   | 'ERR_TWA_NO_BROWSER'
   | 'ERR_TWA_BROWSER_UNAVAILABLE'
@@ -23,8 +25,10 @@ export type TwaErrorCode =
 /**
  * Error thrown by `ExpoTwaBridge.launch()` or `ExpoTwaBridge.postMessage()`.
  *
- * Digital Asset Links verification failures are thrown as
- * `ERR_TWA_VERIFICATION_FAILED`; the TWA never opens in that case.
+ * In `strict` verification mode, Digital Asset Links failures are thrown as
+ * `ERR_TWA_VERIFICATION_FAILED`; the TWA never opens in that case. In
+ * `permissive` mode (the default) verification results are not launch errors;
+ * the browser decides how to present the URL.
  *
  * `ERR_TWA_NO_BROWSER`, `ERR_TWA_BROWSER_UNAVAILABLE`,
  * `ERR_TWA_CUSTOM_TABS_UNAVAILABLE` and `ERR_TWA_FALLBACK_FAILED` describe

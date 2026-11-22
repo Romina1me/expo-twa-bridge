@@ -54,6 +54,11 @@ internal class StrictTwaLauncher(private val activity: Activity) {
   private var uri: Uri? = null
   private var displayMode: TrustedWebActivityDisplayMode? = null
   private var additionalTrustedOrigins: List<String> = emptyList()
+  private var verificationMode: VerificationMode = VerificationMode.PERMISSIVE
+  private var splashScreen: SplashScreenConfig? = null
+  private var verificationSatisfied = false
+  private var splashResolved = false
+  private var splashParams: Bundle? = null
 
   private var postMessageSourceOrigin: String? = null
   private var postMessageTargetOrigin: String? = null
@@ -66,17 +71,37 @@ internal class StrictTwaLauncher(private val activity: Activity) {
   private var channelClosedEmitted = false
 
   private var pendingLaunchOrigins: MutableSet<String> = mutableSetOf()
+  private var launchValidationAttempts: MutableMap<String, Int> = mutableMapOf()
+  private var launchValidationTimeouts: MutableMap<String, Runnable> = mutableMapOf()
   private var callback: Callback? = null
   private var launchSettled = false
 
   private val launchTimeoutRunnable = Runnable {
-    failLaunch(
-      "ERR_TWA_VERIFICATION_TIMEOUT",
-      "Digital Asset Links verification timed out. The browser did not respond within " +
-        "${LAUNCH_TIMEOUT_MS / 1000} seconds.",
-      null,
-      fallbackEligible = false
-    )
+    when (VerificationPolicy.onTimeout(verificationMode)) {
+      is VerificationDecision.Reject -> failLaunch(
+        "ERR_TWA_VERIFICATION_TIMEOUT",
+        "Digital Asset Links verification timed out. The browser did not respond within " +
+          "${LAUNCH_TIMEOUT_MS / 1000} seconds.",
+        null,
+        fallbackEligible = false
+      )
+      // Permissive only reaches this when the service never connected: a
+      // connected session launches immediately. Treat it as a launch problem,
+      // not a verification failure, so the fallback policy can apply.
+      VerificationDecision.ProceedUnverified -> {
+        if (session != null) {
+          launchValidated()
+        } else {
+          failLaunch(
+            "ERR_TWA_LAUNCH_FAILED",
+            "The browser did not connect within ${LAUNCH_TIMEOUT_MS / 1000} seconds.",
+            null,
+            fallbackEligible = true
+          )
+        }
+      }
+      else -> Unit
+    }
   }
 
   private val channelTimeoutRunnable = Runnable {
@@ -146,6 +171,8 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     uri: Uri,
     displayMode: TrustedWebActivityDisplayMode,
     additionalTrustedOrigins: List<String>,
+    verificationMode: VerificationMode,
+    splashScreen: SplashScreenConfig?,
     postMessageSourceOrigin: String?,
     postMessageTargetOrigin: String?,
     callback: Callback
@@ -153,6 +180,8 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     prepareLaunch(
       providerPackage,
       uri,
+      verificationMode,
+      splashScreen,
       postMessageSourceOrigin,
       postMessageTargetOrigin,
       callback
@@ -175,23 +204,21 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     pendingLaunchOrigins.addAll(additionalTrustedOrigins)
 
     connect(providerPackage) { newSession ->
-      for (origin in pendingLaunchOrigins.toList()) {
-        val submitted = newSession.validateRelationship(
-          CustomTabsService.RELATION_HANDLE_ALL_URLS,
-          Uri.parse(origin),
-          null
-        )
-        if (!submitted) {
-          failLaunch(
-            "ERR_TWA_VERIFICATION_UNAVAILABLE",
-            "The browser rejected the Digital Asset Links verification request for $origin.",
-            null,
-            fallbackEligible = false
-          )
-          return@connect
+      prepareSplashScreen(newSession)
+
+      if (VerificationPolicy.requiresPreLaunchVerification(verificationMode)) {
+        for (origin in pendingLaunchOrigins.toList()) {
+          launchValidationAttempts[origin] = 1
+          submitLaunchValidation(origin, newSession)
         }
+        submitPostMessageValidation(newSession)
+      } else {
+        // Permissive: launch the real TWA intent without our pre-check gate.
+        // Chrome still verifies the origin itself when it handles the intent,
+        // and this launch is never reported as verified.
+        submitPostMessageValidation(newSession)
+        onVerificationSatisfied()
       }
-      submitPostMessageValidation(newSession)
     }
 
     handler.postDelayed(launchTimeoutRunnable, LAUNCH_TIMEOUT_MS)
@@ -212,6 +239,8 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     prepareLaunch(
       providerPackage,
       uri,
+      VerificationMode.PERMISSIVE,
+      null,
       postMessageSourceOrigin,
       postMessageTargetOrigin,
       callback
@@ -244,6 +273,7 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     launchSettled = true
     handler.removeCallbacks(launchTimeoutRunnable)
     handler.removeCallbacks(channelTimeoutRunnable)
+    cancelAllLaunchValidationTimeouts()
     unbind()
     session = null
     channelReady = false
@@ -258,18 +288,27 @@ internal class StrictTwaLauncher(private val activity: Activity) {
   private fun prepareLaunch(
     providerPackage: String,
     uri: Uri,
+    verificationMode: VerificationMode,
+    splashScreen: SplashScreenConfig?,
     postMessageSourceOrigin: String?,
     postMessageTargetOrigin: String?,
     callback: Callback
   ) {
     this.providerPackage = providerPackage
     this.uri = uri
+    this.verificationMode = verificationMode
+    this.splashScreen = splashScreen
+    this.verificationSatisfied = false
+    this.splashResolved = splashScreen == null
+    this.splashParams = null
     this.displayMode = null
     this.additionalTrustedOrigins = emptyList()
     this.postMessageSourceOrigin = postMessageSourceOrigin
     this.postMessageTargetOrigin = postMessageTargetOrigin
     this.callback = callback
     this.pendingLaunchOrigins = mutableSetOf()
+    this.launchValidationAttempts = mutableMapOf()
+    this.launchValidationTimeouts = mutableMapOf()
     this.navigationFinished = false
     this.channelRequested = false
   }
@@ -413,30 +452,161 @@ internal class StrictTwaLauncher(private val activity: Activity) {
   }
 
   private fun handleLaunchValidation(origin: String, validated: Boolean) {
-    if (launchSettled) {
-      return
-    }
-    if (!pendingLaunchOrigins.remove(origin)) {
+    if (launchSettled || !pendingLaunchOrigins.contains(origin)) {
       return
     }
 
+    cancelLaunchValidationTimeout(origin)
     Log.i(TAG, "Digital Asset Links result for $origin: validated=$validated")
 
-    if (!validated) {
-      failLaunch(
-        "ERR_TWA_VERIFICATION_FAILED",
-        "Digital Asset Links verification failed for $origin. Serve " +
-          "$origin/.well-known/assetlinks.json with this app's package name and " +
-          "signing certificate SHA-256 for the " +
-          "delegate_permission/common.handle_all_urls relation.",
-        null,
-        fallbackEligible = false
+    val decision = VerificationPolicy.onResult(
+      mode = verificationMode,
+      validated = validated,
+      attempt = launchValidationAttempts[origin] ?: 1,
+      maxAttempts = VALIDATION_MAX_ATTEMPTS,
+      failureCode = "ERR_TWA_VERIFICATION_FAILED",
+      failureMessage = "Digital Asset Links verification failed for $origin. Serve " +
+        "$origin/.well-known/assetlinks.json with this app's package name and " +
+        "signing certificate SHA-256 for the " +
+        "delegate_permission/common.handle_all_urls relation."
+    )
+
+    applyLaunchValidationDecision(origin, decision)
+  }
+
+  private fun submitLaunchValidation(origin: String, currentSession: CustomTabsSession) {
+    if (launchSettled || !pendingLaunchOrigins.contains(origin)) {
+      return
+    }
+
+    val submitted = currentSession.validateRelationship(
+      CustomTabsService.RELATION_HANDLE_ALL_URLS,
+      Uri.parse(origin),
+      null
+    )
+    if (!submitted) {
+      onLaunchValidationFailure(
+        origin,
+        "ERR_TWA_VERIFICATION_UNAVAILABLE",
+        "The browser rejected the Digital Asset Links verification request for $origin."
       )
       return
     }
 
-    if (pendingLaunchOrigins.isEmpty()) {
-      launchValidated()
+    armLaunchValidationTimeout(origin)
+  }
+
+  /**
+   * Each attempt gets its own deadline so a browser that never answers still
+   * consumes an attempt and is retried, instead of failing the launch without
+   * exhausting [VALIDATION_MAX_ATTEMPTS].
+   */
+  private fun armLaunchValidationTimeout(origin: String) {
+    cancelLaunchValidationTimeout(origin)
+
+    val timeout = Runnable {
+      launchValidationTimeouts.remove(origin)
+      if (launchSettled || !pendingLaunchOrigins.contains(origin)) {
+        return@Runnable
+      }
+      Log.i(TAG, "Digital Asset Links verification timed out for $origin.")
+      onLaunchValidationFailure(
+        origin,
+        "ERR_TWA_VERIFICATION_TIMEOUT",
+        "Digital Asset Links verification timed out for $origin. The browser did not " +
+          "respond within ${VALIDATION_ATTEMPT_TIMEOUT_MS / 1000} seconds."
+      )
+    }
+
+    launchValidationTimeouts[origin] = timeout
+    handler.postDelayed(timeout, VALIDATION_ATTEMPT_TIMEOUT_MS)
+  }
+
+  private fun cancelLaunchValidationTimeout(origin: String) {
+    launchValidationTimeouts.remove(origin)?.let { handler.removeCallbacks(it) }
+  }
+
+  private fun cancelAllLaunchValidationTimeouts() {
+    launchValidationTimeouts.values.forEach { handler.removeCallbacks(it) }
+    launchValidationTimeouts.clear()
+  }
+
+  /**
+   * A Digital Asset Links result can be `false` on the first cold request even
+   * when the origin serves a valid `assetlinks.json` (for example the first
+   * launch right after install); a later request usually succeeds. Retry the
+   * validation a few times before reporting the failure. Permissive mode never
+   * blocks on this.
+   */
+  private fun onLaunchValidationFailure(origin: String, code: String, message: String) {
+    if (launchSettled || !pendingLaunchOrigins.contains(origin)) {
+      return
+    }
+
+    val decision = VerificationPolicy.onResult(
+      mode = verificationMode,
+      validated = false,
+      attempt = launchValidationAttempts[origin] ?: 1,
+      maxAttempts = VALIDATION_MAX_ATTEMPTS,
+      failureCode = code,
+      failureMessage = message
+    )
+
+    applyLaunchValidationDecision(origin, decision)
+  }
+
+  private fun applyLaunchValidationDecision(
+    origin: String,
+    decision: VerificationDecision
+  ) {
+    when (decision) {
+      VerificationDecision.Retry -> {
+        cancelLaunchValidationTimeout(origin)
+        val attempts = launchValidationAttempts[origin] ?: 1
+        launchValidationAttempts[origin] = attempts + 1
+        Log.i(
+          TAG,
+          "Retrying Digital Asset Links verification for $origin " +
+            "(${attempts + 1}/$VALIDATION_MAX_ATTEMPTS)."
+        )
+        handler.postDelayed(
+          {
+            val currentSession = session
+            if (currentSession == null) {
+              failLaunch(
+                "ERR_TWA_VERIFICATION_UNAVAILABLE",
+                "The browser disconnected before Digital Asset Links verification for $origin " +
+                  "completed.",
+                null,
+                fallbackEligible = false
+              )
+            } else {
+              submitLaunchValidation(origin, currentSession)
+            }
+          },
+          VALIDATION_RETRY_DELAY_MS
+        )
+      }
+      VerificationDecision.Verified -> {
+        cancelLaunchValidationTimeout(origin)
+        pendingLaunchOrigins.remove(origin)
+        launchValidationAttempts.remove(origin)
+        if (pendingLaunchOrigins.isEmpty()) {
+          onVerificationSatisfied()
+        }
+      }
+      VerificationDecision.ProceedUnverified -> {
+        cancelLaunchValidationTimeout(origin)
+        pendingLaunchOrigins.remove(origin)
+        launchValidationAttempts.remove(origin)
+        onVerificationSatisfied()
+      }
+      is VerificationDecision.Reject -> {
+        cancelLaunchValidationTimeout(origin)
+        pendingLaunchOrigins.remove(origin)
+        launchValidationAttempts.remove(origin)
+        failLaunch(decision.code, decision.message, null, fallbackEligible = false)
+      }
     }
   }
 
@@ -512,6 +682,46 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     Log.i(TAG, "Requested PostMessage channel: source=$sourceOrigin target=$targetOrigin")
   }
 
+  private fun prepareSplashScreen(currentSession: CustomTabsSession) {
+    val config = splashScreen
+    if (config == null) {
+      splashResolved = true
+      return
+    }
+
+    val provider = providerPackage
+    if (provider == null || !TwaSplashScreen.areSplashScreensSupported(activity, provider)) {
+      Log.i(TAG, "Splash screens are not supported by $provider; launching without one.")
+      splashResolved = true
+      return
+    }
+
+    TwaSplashScreen.prepare(activity, provider, currentSession, config) { params ->
+      if (launchSettled) {
+        return@prepare
+      }
+      splashParams = params
+      splashResolved = true
+      maybeLaunch()
+    }
+  }
+
+  private fun onVerificationSatisfied() {
+    if (launchSettled) {
+      return
+    }
+    verificationSatisfied = true
+    maybeLaunch()
+  }
+
+  /** Launches only after verification passed and splash preparation settled. */
+  private fun maybeLaunch() {
+    if (launchSettled || !verificationSatisfied || !splashResolved) {
+      return
+    }
+    launchValidated()
+  }
+
   private fun launchValidated() {
     val uri = uri
     val displayMode = displayMode
@@ -533,6 +743,7 @@ internal class StrictTwaLauncher(private val activity: Activity) {
       if (additionalTrustedOrigins.isNotEmpty()) {
         builder.setAdditionalTrustedOrigins(additionalTrustedOrigins)
       }
+      splashParams?.let { builder.setSplashScreenParams(it) }
 
       val intent = builder.build(currentSession)
       // Route the launch to the verified provider instead of the system default.
@@ -594,6 +805,7 @@ internal class StrictTwaLauncher(private val activity: Activity) {
     launchSettled = true
     handler.removeCallbacks(launchTimeoutRunnable)
     handler.removeCallbacks(channelTimeoutRunnable)
+    cancelAllLaunchValidationTimeouts()
     unbind()
     session = null
 
@@ -613,7 +825,12 @@ internal class StrictTwaLauncher(private val activity: Activity) {
   }
 
   private companion object {
-    const val LAUNCH_TIMEOUT_MS = 15_000L
+    // Safety net above VALIDATION_MAX_ATTEMPTS * VALIDATION_ATTEMPT_TIMEOUT_MS
+    // plus the retry delays.
+    const val LAUNCH_TIMEOUT_MS = 45_000L
+    const val VALIDATION_MAX_ATTEMPTS = 3
+    const val VALIDATION_RETRY_DELAY_MS = 1_500L
+    const val VALIDATION_ATTEMPT_TIMEOUT_MS = 10_000L
     const val CHANNEL_TIMEOUT_MS = 25_000L
   }
 }
