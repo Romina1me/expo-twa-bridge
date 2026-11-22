@@ -59,7 +59,10 @@ yarn-error.log
 example/android/
 example/dist*/
 
+example/.expo/
+
 # Signing (never commit keystores or credentials)
 *.keystore
 !debug.keystore
 keystore.properties
+
