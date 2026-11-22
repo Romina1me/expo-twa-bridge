@@ -34,7 +34,7 @@ class ExpoTwaBridgeModule : Module() {
         fallback: String,
         browserPackage: String?,
         additionalTrustedOrigins: List<String>,
-        options: Map<String, Any?>?,
+        options: TwaLaunchOptionsRecord?,
         verification: String,
         promise: Promise ->
       val activity = appContext.currentActivity
@@ -97,7 +97,7 @@ class ExpoTwaBridgeModule : Module() {
         return@AsyncFunction
       }
 
-      val postMessageOptions = options?.get("postMessage") as? Map<*, *>
+      val postMessageOptions = options?.postMessage
       val postMessageConfig = parsePostMessageConfig(uri, postMessageOptions)
       if (postMessageOptions != null && postMessageConfig == null) {
         promise.reject(
@@ -108,7 +108,7 @@ class ExpoTwaBridgeModule : Module() {
         return@AsyncFunction
       }
 
-      val splashScreenOptions = options?.get("splashScreen") as? Map<*, *>
+      val splashScreenOptions = options?.splashScreen
       val splashScreenConfig = parseSplashScreenConfig(splashScreenOptions)
       if (splashScreenOptions != null && splashScreenConfig == null) {
         promise.reject(
@@ -363,37 +363,36 @@ class ExpoTwaBridgeModule : Module() {
 
   private fun parsePostMessageConfig(
     uri: Uri,
-    options: Map<*, *>?
+    options: TwaPostMessageOptionsRecord?
   ): PostMessageConfig? {
     if (options == null) {
       return null
     }
 
-    val rawSource = options["sourceOrigin"] as? String
-    val rawTarget = options["targetOrigin"] as? String
-
     val source = when {
-      rawSource == null -> originOf(uri) ?: return null
-      else -> parseOrigin(rawSource) ?: return null
+      options.sourceOrigin == null -> originOf(uri) ?: return null
+      else -> parseOrigin(options.sourceOrigin!!) ?: return null
     }
     val target = when {
-      rawTarget == null -> source
-      else -> parseOrigin(rawTarget) ?: return null
+      options.targetOrigin == null -> source
+      else -> parseOrigin(options.targetOrigin!!) ?: return null
     }
     return PostMessageConfig(source, target)
   }
 
-  private fun parseSplashScreenConfig(options: Map<*, *>?): SplashScreenConfig? {
+  private fun parseSplashScreenConfig(
+    options: TwaSplashScreenOptionsRecord?
+  ): SplashScreenConfig? {
     if (options == null) {
       return null
     }
 
-    val image = (options["image"] as? String)?.trim()
+    val image = options.image?.trim()
     if (image.isNullOrEmpty()) {
       return null
     }
 
-    val backgroundColor = (options["backgroundColor"] as? String)?.let { value ->
+    val backgroundColor = options.backgroundColor?.let { value ->
       runCatching { Color.parseColor(value) }.getOrNull()
     } ?: DEFAULT_SPLASH_BACKGROUND_COLOR
 
