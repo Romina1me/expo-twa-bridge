@@ -68,9 +68,14 @@ export default function App() {
     try {
       const result = await ExpoTwaBridge.launch({
         url,
+        verification: 'strict',
         displayMode: immersive ? 'immersive' : 'default',
         fallback: allowCustomTabsFallback ? 'custom-tabs' : 'none',
         browserPackage: browserPackage.trim() || undefined,
+        splashScreen: {
+          image: require('./assets/splash.png'),
+          backgroundColor: '#0B7285',
+        },
         postMessage: {},
       });
       setLaunchMode(result.mode);

@@ -6,6 +6,8 @@
   "types": "build/index.d.ts",
   "scripts": {
     "build": "node internal/module_scripts/build.js",
+    "build:once": "node internal/module_scripts/build.js --once && node internal/module_scripts/build.js plugin --once",
+    "sync:example": "npm run build:once && node internal/module_scripts/sync-example.js",
     "clean": "node internal/module_scripts/clean.js",
     "lint": "eslint src/",
     "test": "node internal/module_scripts/test.js",

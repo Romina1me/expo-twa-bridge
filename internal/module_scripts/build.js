@@ -4,7 +4,9 @@ const fs = require('fs');
 const path = require('path');
 
 const SUBTARGETS = ['plugin', 'cli', 'utils', 'scripts'];
-const args = process.argv.slice(2);
+const rawArgs = process.argv.slice(2);
+const once = rawArgs.includes('--once');
+const args = rawArgs.filter((arg) => arg !== '--once');
 const target = args[0];
 
 let tscArgs;
@@ -20,6 +22,7 @@ if (SUBTARGETS.includes(target)) {
 }
 
 if (
+  !once &&
   process.stdout.isTTY &&
   !process.env.CI &&
   !process.env.EXPO_NONINTERACTIVE &&
