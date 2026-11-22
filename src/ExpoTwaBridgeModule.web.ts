@@ -3,7 +3,7 @@ import { NativeModule, registerWebModule } from 'expo';
 import { TwaLaunchError } from './ExpoTwaBridge.errors';
 import type { TwaLaunchOptions, TwaLaunchResult } from './ExpoTwaBridge.types';
 
-class ExpoTwaBridgeModule extends NativeModule<{}> {
+class ExpoTwaBridgeModule extends NativeModule<Record<string, never>> {
   async launch(): Promise<void> {
     throw new TwaLaunchError(
       'ERR_TWA_UNSUPPORTED',

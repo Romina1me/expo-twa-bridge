@@ -408,7 +408,8 @@ effectively exposed to the page's code.
   PostMessage API (for example Chrome 115+). Verifying the TWA does not imply
   the browser also supports PostMessage.
 - The page must be served over HTTPS.
-- The website must verify the app through
+- For a verified fullscreen TWA (and for `verification: 'strict'`), the website
+  must verify the app through
   [Digital Asset Links](https://developers.google.com/digital-asset-links):
   host `/.well-known/assetlinks.json` with the app's package name and signing
   certificate SHA-256 fingerprint.
