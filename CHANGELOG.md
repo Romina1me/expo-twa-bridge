@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Add an optional fullscreen WebView fallback: `fallback: 'webview'`. It is
+  used only for browser/session/launch availability failures, loads the
+  requested HTTPS URL in a dedicated Activity, hides both Android system bars
+  in immersive mode, and handles WebView history with the Android back button.
+  Strict Digital Asset Links failures and timeouts still never fall back.
+- The WebView fallback has no PostMessage channel. When `postMessage` is
+  requested and the WebView fallback opens, `onChannelError` reports
+  `ERR_TWA_POSTMESSAGE_UNAVAILABLE` and `postMessage()` rejects with
+  `ERR_TWA_POSTMESSAGE_NOT_READY`.
+- `launch()` now resolves `{ mode: 'webview', verified: false }` when the
+  WebView fallback opens. `fallback: 'custom-tabs'` remains the default.
+
 ## 0.1.0 (2026-11-22)
 
 - Initial release.

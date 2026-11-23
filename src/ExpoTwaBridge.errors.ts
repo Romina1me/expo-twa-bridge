@@ -32,8 +32,9 @@ export type TwaErrorCode =
  *
  * `ERR_TWA_NO_BROWSER`, `ERR_TWA_BROWSER_UNAVAILABLE`,
  * `ERR_TWA_CUSTOM_TABS_UNAVAILABLE` and `ERR_TWA_FALLBACK_FAILED` describe
- * browser/environment problems; with `fallback: 'custom-tabs'` the launch is
- * retried in Android Custom Tabs before these are reported.
+ * browser/environment problems; with `fallback: 'custom-tabs'` or
+ * `fallback: 'webview'` the launch is retried on that surface before these
+ * are reported. Verification failures and timeouts never fall back.
  */
 export class TwaLaunchError extends Error {
   readonly code: TwaErrorCode;

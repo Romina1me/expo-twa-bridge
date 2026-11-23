@@ -1,6 +1,7 @@
 package expo.modules.twabridge
 
 import android.app.Activity
+import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.util.Log
@@ -66,12 +67,13 @@ class ExpoTwaBridgeModule : Module() {
         )
         return@AsyncFunction
       }
+      val immersive = mode is TrustedWebActivityDisplayMode.ImmersiveMode
 
       val fallbackPolicy = FallbackPolicy.fromValue(fallback)
       if (fallbackPolicy == null) {
         promise.reject(
           "ERR_TWA_INVALID_FALLBACK_MODE",
-          "fallback must be either \"custom-tabs\" or \"none\".",
+          "fallback must be either \"custom-tabs\", \"webview\" or \"none\".",
           null
         )
         return@AsyncFunction
@@ -174,9 +176,29 @@ class ExpoTwaBridgeModule : Module() {
                   fallbackPackage = providerPackage,
                   postMessageConfig = postMessageConfig,
                   promise = promise,
-                  allowFallbackFromTwa = false
+                  allowFallbackFromTwa = false,
+                  immersive = immersive
                 )
               )
+            }
+
+            LaunchStrategy.WEBVIEW -> {
+              Log.i(TAG, "Launching the WebView fallback: url=$url")
+
+              launcher = null
+              if (!launchWebViewFallback(activity, uri, immersive)) {
+                promise.reject(
+                  "ERR_TWA_FALLBACK_FAILED",
+                  "The WebView fallback could not be launched.",
+                  null
+                )
+                return@runOnUiThread
+              }
+
+              if (postMessageConfig != null) {
+                emitWebViewPostMessageUnavailable()
+              }
+              promise.resolve(LaunchSurface.WEBVIEW.mode)
             }
 
             LaunchStrategy.TWA -> {
@@ -210,7 +232,8 @@ class ExpoTwaBridgeModule : Module() {
                   fallbackPackage = providerPackage,
                   postMessageConfig = postMessageConfig,
                   promise = promise,
-                  allowFallbackFromTwa = true
+                  allowFallbackFromTwa = true,
+                  immersive = immersive
                 )
               )
             }
@@ -264,8 +287,8 @@ class ExpoTwaBridgeModule : Module() {
 
   /**
    * Builds the launcher callback for a surface. A fallback-eligible TWA
-   * failure is retried once with Android Custom Tabs when the fallback policy
-   * allows it; verification failures are never retried.
+   * failure is retried once with the configured fallback surface; verification
+   * failures are never retried.
    */
   private fun createCallback(
     activity: Activity,
@@ -275,7 +298,8 @@ class ExpoTwaBridgeModule : Module() {
     fallbackPackage: String?,
     postMessageConfig: PostMessageConfig?,
     promise: Promise,
-    allowFallbackFromTwa: Boolean
+    allowFallbackFromTwa: Boolean,
+    immersive: Boolean
   ): StrictTwaLauncher.Callback =
     object : StrictTwaLauncher.Callback {
       override fun onLaunched() {
@@ -288,13 +312,37 @@ class ExpoTwaBridgeModule : Module() {
         cause: Throwable?,
         fallbackEligible: Boolean
       ) {
-        val canFallback = allowFallbackFromTwa &&
-          fallbackEligible &&
-          fallback == FallbackPolicy.CUSTOM_TABS &&
-          fallbackPackage != null
+        val strategy = if (allowFallbackFromTwa) {
+          resolveFallbackStrategy(fallback, fallbackEligible)
+        } else {
+          null
+        }
 
-        if (!canFallback) {
+        val canFallbackToCustomTabs =
+          strategy == LaunchStrategy.CUSTOM_TABS && fallbackPackage != null
+        val canFallbackToWebView = strategy == LaunchStrategy.WEBVIEW
+
+        if (!canFallbackToCustomTabs && !canFallbackToWebView) {
           promise.reject(code, message, cause)
+          return
+        }
+
+        if (canFallbackToWebView) {
+          Log.i(TAG, "$code: $message — falling back to the WebView.")
+          launcher?.destroy()
+          launcher = null
+          if (!launchWebViewFallback(activity, uri, immersive)) {
+            promise.reject(
+              "ERR_TWA_FALLBACK_FAILED",
+              "The WebView fallback could not be launched.",
+              cause
+            )
+            return
+          }
+          if (postMessageConfig != null) {
+            emitWebViewPostMessageUnavailable()
+          }
+          promise.resolve(LaunchSurface.WEBVIEW.mode)
           return
         }
 
@@ -303,7 +351,7 @@ class ExpoTwaBridgeModule : Module() {
         val fallbackLauncher = StrictTwaLauncher(activity)
         launcher = fallbackLauncher
         fallbackLauncher.launchCustomTabs(
-          fallbackPackage,
+          fallbackPackage!!,
           uri,
           postMessageConfig?.sourceOrigin,
           postMessageConfig?.targetOrigin,
@@ -315,7 +363,8 @@ class ExpoTwaBridgeModule : Module() {
             fallbackPackage = fallbackPackage,
             postMessageConfig = postMessageConfig,
             promise = promise,
-            allowFallbackFromTwa = false
+            allowFallbackFromTwa = false,
+            immersive = immersive
           )
         )
       }
@@ -339,6 +388,34 @@ class ExpoTwaBridgeModule : Module() {
         sendEvent("onMessage", mapOf("data" to data))
       }
     }
+
+  private fun launchWebViewFallback(
+    activity: Activity,
+    uri: Uri,
+    immersive: Boolean
+  ): Boolean =
+    try {
+      val intent = Intent(activity, TwaWebViewActivity::class.java).apply {
+        putExtra(TwaWebViewActivity.EXTRA_URL, uri.toString())
+        putExtra(TwaWebViewActivity.EXTRA_IMMERSIVE, immersive)
+      }
+      activity.startActivity(intent)
+      true
+    } catch (error: Exception) {
+      Log.e(TAG, "The WebView fallback could not be launched.", error)
+      false
+    }
+
+  private fun emitWebViewPostMessageUnavailable() {
+    sendEvent(
+      "onChannelError",
+      mapOf(
+        "code" to "ERR_TWA_POSTMESSAGE_UNAVAILABLE",
+        "message" to "PostMessage is not available in the WebView fallback. " +
+          "Use fallback: \"custom-tabs\" or launch a Trusted Web Activity to use PostMessage."
+      )
+    )
+  }
 
   private fun parseDisplayMode(value: String): TrustedWebActivityDisplayMode? =
     when (value.lowercase()) {

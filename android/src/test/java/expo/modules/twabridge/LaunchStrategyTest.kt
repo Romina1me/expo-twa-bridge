@@ -117,9 +117,92 @@ class LaunchStrategyTest {
   }
 
   @Test
+  fun `webview fallback is used when only custom tabs are available`() {
+    val decision = decideLaunchStrategy(
+      capabilities(supportsTwa = false),
+      FallbackPolicy.WEBVIEW
+    )
+    assertEquals(LaunchStrategy.WEBVIEW, decision.strategy)
+    assertNull(decision.errorCode)
+  }
+
+  @Test
+  fun `webview fallback is used when no browser is available`() {
+    val decision = decideLaunchStrategy(
+      capabilities(
+        packageName = null,
+        installed = false,
+        supportsTwa = false,
+        supportsCustomTabs = false
+      ),
+      FallbackPolicy.WEBVIEW
+    )
+    assertEquals(LaunchStrategy.WEBVIEW, decision.strategy)
+    assertNull(decision.errorCode)
+  }
+
+  @Test
+  fun `webview fallback never replaces an available twa browser`() {
+    val decision = decideLaunchStrategy(capabilities(), FallbackPolicy.WEBVIEW)
+    assertEquals(LaunchStrategy.TWA, decision.strategy)
+  }
+
+  @Test
+  fun `webview fallback handles a missing explicit package`() {
+    val decision = decideLaunchStrategy(
+      capabilities(
+        packageName = "com.example.browser",
+        installed = false,
+        supportsTwa = false,
+        supportsCustomTabs = false,
+        isExplicit = true
+      ),
+      FallbackPolicy.WEBVIEW
+    )
+    assertEquals(LaunchStrategy.WEBVIEW, decision.strategy)
+    assertNull(decision.errorCode)
+  }
+
+  @Test
+  fun `webview fallback handles an explicit package without custom tabs`() {
+    val decision = decideLaunchStrategy(
+      capabilities(
+        packageName = "com.example.browser",
+        supportsTwa = false,
+        supportsCustomTabs = false,
+        isExplicit = true
+      ),
+      FallbackPolicy.WEBVIEW
+    )
+    assertEquals(LaunchStrategy.WEBVIEW, decision.strategy)
+    assertNull(decision.errorCode)
+  }
+
+  @Test
+  fun `fallback eligible failures retry on the configured surface`() {
+    assertEquals(
+      LaunchStrategy.CUSTOM_TABS,
+      resolveFallbackStrategy(FallbackPolicy.CUSTOM_TABS, fallbackEligible = true)
+    )
+    assertEquals(
+      LaunchStrategy.WEBVIEW,
+      resolveFallbackStrategy(FallbackPolicy.WEBVIEW, fallbackEligible = true)
+    )
+    assertNull(resolveFallbackStrategy(FallbackPolicy.NONE, fallbackEligible = true))
+  }
+
+  @Test
+  fun `verification failures never fall back`() {
+    assertNull(resolveFallbackStrategy(FallbackPolicy.CUSTOM_TABS, fallbackEligible = false))
+    assertNull(resolveFallbackStrategy(FallbackPolicy.WEBVIEW, fallbackEligible = false))
+    assertNull(resolveFallbackStrategy(FallbackPolicy.NONE, fallbackEligible = false))
+  }
+
+  @Test
   fun `fallback policy parses known values only`() {
     assertEquals(FallbackPolicy.CUSTOM_TABS, FallbackPolicy.fromValue("custom-tabs"))
+    assertEquals(FallbackPolicy.WEBVIEW, FallbackPolicy.fromValue("webview"))
     assertEquals(FallbackPolicy.NONE, FallbackPolicy.fromValue("NONE"))
-    assertNull(FallbackPolicy.fromValue("webview"))
+    assertNull(FallbackPolicy.fromValue("browser"))
   }
 }
