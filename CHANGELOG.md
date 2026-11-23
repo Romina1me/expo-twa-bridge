@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 (2026-11-23)
 
 - Add an optional fullscreen WebView fallback: `fallback: 'webview'`. It is
   used only for browser/session/launch availability failures, loads the
