@@ -1,21 +1,23 @@
 # expo-twa-bridge
 
 A strict-first Expo native module for opening HTTPS websites in an Android
-Trusted Web Activity (TWA) through Chrome, without a WebView.
+Trusted Web Activity (TWA) through Chrome.
 
 The package launches a genuine Trusted Web Activity. With
 `verification: 'strict'` it requires Digital Asset Links verification to pass
 before the browser is launched; with the default `verification: 'permissive'`
 it launches the TWA intent and lets Chrome perform its own verification, so
 Chrome decides whether to show the URL fullscreen or with browser UI. If the
-browser cannot host a TWA, it may instead open the URL in Android Custom Tabs
-with the browser chrome visible when the Custom Tabs fallback is enabled (the
-default). It never uses a WebView, Expo WebBrowser, or a regular browser
-activity, and a failed verification is never reported as verified.
+browser cannot host a TWA, it can instead open the URL in Android Custom Tabs
+with the browser chrome visible (the default), or in a dedicated fullscreen
+WebView Activity when `fallback: 'webview'` is explicitly configured. It never
+uses Expo WebBrowser or a regular browser activity, and a failed verification
+is never reported as verified.
 
 It can also open a bidirectional `postMessage` channel on the **same**
 `CustomTabsSession` used to launch the TWA (and, on the Custom Tabs fallback,
-the same session is used there).
+the same session is used there). The WebView fallback has no PostMessage
+channel.
 
 ## Installation
 
@@ -59,8 +61,9 @@ await ExpoTwaBridge.launch({
   // Extra HTTPS origins that should also be shown without browser controls.
   additionalTrustedOrigins: ['https://app.example.com'],
   // Optional: when the browser cannot host a TWA, fall back to Android Custom
-  // Tabs (chrome visible). 'custom-tabs' is the default; 'none' rejects.
-  fallback: 'custom-tabs',
+  // Tabs (chrome visible, the default) or to a dedicated fullscreen WebView.
+  // 'none' rejects instead. The WebView fallback has no PostMessage channel.
+  fallback: 'custom-tabs', // or 'webview'
   // Optional: pin the browser package that hosts the TWA (e.g. Chrome).
   // browserPackage: 'com.android.chrome',
   // Optional: splash image shown by Chrome while the TWA loads. `image` accepts
@@ -85,7 +88,7 @@ const { mode, verified } = await ExpoTwaBridge.launch({
   url: 'https://example.com',
   verification: 'strict',
 });
-// mode: 'twa' | 'custom-tabs'
+// mode: 'twa' | 'custom-tabs' | 'webview'
 // verified: true only for a strict-mode TWA launch
 ```
 
@@ -96,7 +99,7 @@ It throws a `TwaLaunchError` with one of the following codes:
 | `ERR_TWA_NO_ACTIVITY`                   | No foreground Android `Activity` to launch from.                       |
 | `ERR_TWA_INVALID_URL`                   | The URL is not an absolute HTTPS URL.                                  |
 | `ERR_TWA_INVALID_DISPLAY_MODE`          | `displayMode` is not `immersive` or `default`.                         |
-| `ERR_TWA_INVALID_FALLBACK_MODE`         | `fallback` is not `custom-tabs` or `none`.                             |
+| `ERR_TWA_INVALID_FALLBACK_MODE`         | `fallback` is not `custom-tabs`, `webview`, or `none`.                 |
 | `ERR_TWA_INVALID_VERIFICATION_MODE`     | `verification` is not `strict` or `permissive`.                        |
 | `ERR_TWA_INVALID_SPLASH_SCREEN`         | `splashScreen.image` could not be resolved to an image URI.            |
 | `ERR_TWA_INVALID_ORIGIN`                | An additional origin is not an absolute HTTPS origin.                  |
@@ -106,12 +109,12 @@ It throws a `TwaLaunchError` with one of the following codes:
 | `ERR_TWA_VERIFICATION_FAILED`           | `strict` mode: Digital Asset Links verification failed for the origin. |
 | `ERR_TWA_VERIFICATION_UNAVAILABLE`      | `strict` mode: the browser rejected the verification request.          |
 | `ERR_TWA_VERIFICATION_TIMEOUT`          | `strict` mode: the browser did not finish verification in time.        |
-| `ERR_TWA_FALLBACK_FAILED`               | The Custom Tabs fallback could not be launched.                        |
+| `ERR_TWA_FALLBACK_FAILED`               | The Custom Tabs or WebView fallback could not be launched.             |
 | `ERR_TWA_LAUNCH_FAILED`                 | Session setup or the TWA launch itself failed.                         |
 | `ERR_TWA_POSTMESSAGE_INVALID_ORIGIN`    | A PostMessage origin is not an absolute HTTPS origin.                  |
 | `ERR_TWA_POSTMESSAGE_VERIFICATION_FAILED` | `use_as_origin` Digital Asset Links check failed.                    |
-| `ERR_TWA_POSTMESSAGE_UNAVAILABLE`       | Browser rejected the channel (old Chrome, missing service).            |
-| `ERR_TWA_POSTMESSAGE_NOT_READY`         | `postMessage()` called before the channel is ready.                    |
+| `ERR_TWA_POSTMESSAGE_UNAVAILABLE`       | Browser rejected the channel, or the WebView fallback is active.       |
+| `ERR_TWA_POSTMESSAGE_NOT_READY`         | `postMessage()` called before the channel is ready, or on the WebView fallback. |
 | `ERR_TWA_POSTMESSAGE_FAILED`            | The browser rejected the message.                                      |
 | `ERR_TWA_POSTMESSAGE_TIMEOUT`           | The channel did not become ready in time.                              |
 | `ERR_TWA_UNSUPPORTED`                   | Called on a platform other than Android.                               |
@@ -190,15 +193,36 @@ When the browser cannot host a TWA because of a browser or environment problem
 `fallback` is `'custom-tabs'` (the default), the same URL is opened in Android
 Custom Tabs with the browser chrome visible, and the promise resolves with
 `{ mode: 'custom-tabs', verified: false }`. Set `fallback: 'none'` to reject
-instead. PostMessage keeps working on the fallback through the same Custom Tabs
+instead. PostMessage keeps working on this fallback through the same Custom Tabs
 session.
+
+When `fallback` is `'webview'`, those same availability failures open the URL
+in a dedicated fullscreen Android WebView Activity instead, and the promise
+resolves with `{ mode: 'webview', verified: false }`. The WebView fallback:
+
+- loads the original requested HTTPS URL;
+- honors `displayMode`: `immersive` hides both Android system bars, `default`
+  keeps them visible;
+- keeps HTTPS navigation inside the WebView, blocks cleartext `http://`
+  navigation, cancels TLS errors, and shows an in-Activity error message when
+  the main frame fails to load;
+- uses the Android back button for WebView history before finishing the
+  Activity; and
+- disables file/content access and never exposes a JavaScript interface.
+
+The WebView fallback has **no** PostMessage channel. If `postMessage` was
+requested, `onChannelError` reports `ERR_TWA_POSTMESSAGE_UNAVAILABLE` and
+`postMessage()` rejects with `ERR_TWA_POSTMESSAGE_NOT_READY`. Custom Tabs or a
+TWA is required for PostMessage. Use `fallback: 'none'` to reject instead of
+opening any fallback.
 
 In `strict` mode, Digital Asset Links verification failures and timeouts
 **never** fall back — the promise always rejects with
-`ERR_TWA_VERIFICATION_FAILED` / `ERR_TWA_VERIFICATION_TIMEOUT` and no browser UI
-is opened. In `permissive` mode verification cannot reject the launch, so only
-real browser/launch failures use the fallback policy. A WebView, Expo
-WebBrowser, and a regular browser activity are never used.
+`ERR_TWA_VERIFICATION_FAILED` / `ERR_TWA_VERIFICATION_TIMEOUT` and no browser
+UI or WebView is opened. In `permissive` mode verification cannot reject the
+launch, so only real browser/launch failures use the fallback policy. Expo
+WebBrowser and a regular browser activity are never used; the WebView is used
+only when `fallback: 'webview'` is configured.
 
 An explicit `browserPackage` is never silently replaced: if it is missing or
 cannot host a TWA, the configured `fallback` policy applies.
@@ -213,7 +237,7 @@ const { mode, verified } = await ExpoTwaBridge.launch({
   url: 'https://example.com',
   verification: 'strict',
 });
-// mode: 'twa' | 'custom-tabs'
+// mode: 'twa' | 'custom-tabs' | 'webview'
 // verified: true only when strict verification passed and a TWA opened
 
 if (mode === 'twa' && verified) {
@@ -223,19 +247,23 @@ if (mode === 'twa' && verified) {
   // A TWA intent opened, but verification was not confirmed by this module
   // (permissive mode). Chrome decided how to present the URL.
   onTwaOpened();
-} else {
+} else if (mode === 'custom-tabs') {
   // The Custom Tabs fallback opened the URL with the browser UI visible.
   onFallbackOpened();
+} else {
+  // The fullscreen WebView fallback opened the URL. It is not a verified TWA
+  // and has no PostMessage channel.
+  onWebViewFallbackOpened();
 }
 ```
 
-`verified` is always `false` in `permissive` mode and for `custom-tabs`
-results, so an unverified navigation is never reported as verified.
+`verified` is always `false` in `permissive` mode and for `custom-tabs` and
+`webview` results, so an unverified navigation is never reported as verified.
 
-Whenever `mode` is `'custom-tabs'`, the browser UI is visible and the session is
-**not** a verified fullscreen TWA — the fallback was used only because the
-browser could not host a TWA. Set `fallback: 'none'` if a non-fullscreen surface
-must never be opened.
+Whenever `mode` is `'custom-tabs'` or `'webview'`, the session is **not** a
+verified fullscreen TWA — the fallback was used only because the browser could
+not host a TWA. The WebView fallback is fullscreen but still unverified. Set
+`fallback: 'none'` if a non-TWA surface must never be opened.
 
 ## Fullscreen display modes
 
@@ -245,15 +273,17 @@ and is the default. It hides both browser controls and the Android system bars.
 `default` maps to `TrustedWebActivityDisplayMode.DefaultMode`, which keeps the
 system bars visible.
 
-This is the AndroidX TWA display-mode API, passed through
-`TrustedWebActivityIntentBuilder.setDisplayMode()` — not a WebView and not
-manual `View.SYSTEM_UI_FLAG_*` manipulation.
+For a TWA this is the AndroidX TWA display-mode API, passed through
+`TrustedWebActivityIntentBuilder.setDisplayMode()`. The WebView fallback honors
+the same setting with the equivalent immersive system-bar flags in its
+dedicated Activity.
 
 ## Splash screen
 
 Pass `splashScreen` to show an image while Chrome loads the Trusted Web
 Activity. This covers the moment where Chrome's own Digital Asset Links check
-would otherwise flash the URL bar before switching to fullscreen.
+would otherwise flash the URL bar before switching to fullscreen. The splash
+screen is a TWA feature; the WebView fallback ignores it.
 
 ```ts
 await ExpoTwaBridge.launch({
@@ -285,6 +315,17 @@ await ExpoTwaBridge.launch({
 PostMessage runs over the existing TWA session and requires browser
 verification with the `delegate_permission/common.use_as_origin` Digital Asset
 Links relation.
+
+### WebView fallback
+
+PostMessage is not available with `fallback: 'webview'`. The WebView Activity
+does not create a `CustomTabsSession`, does not inject a JavaScript interface,
+and does not emulate the channel. When the WebView fallback is used,
+`onChannelError` reports `ERR_TWA_POSTMESSAGE_UNAVAILABLE` and `postMessage()`
+rejects with `ERR_TWA_POSTMESSAGE_NOT_READY`. Use `fallback: 'custom-tabs'` or a
+TWA when PostMessage is required. A secure WebView PostMessage implementation
+would have to be added explicitly; this package deliberately does not expose
+one.
 
 `additionalTrustedOrigins` controls which origins the **TWA may navigate to**
 (each must pass `handle_all_urls` verification — this module verifies them in
@@ -324,8 +365,9 @@ await ExpoTwaBridge.postMessage('PING');
 ```
 
 `postMessage()` rejects with `ERR_TWA_POSTMESSAGE_NOT_READY` until
-`addChannelReadyListener` has fired. Messages are raw strings; typed envelopes
-can be layered on top with `JSON.stringify` / `JSON.parse`.
+`addChannelReadyListener` has fired, and whenever the WebView fallback opened
+the URL. Messages are raw strings; typed envelopes can be layered on top with
+`JSON.stringify` / `JSON.parse`.
 
 ### Native → Web and Web → Native
 
@@ -407,6 +449,9 @@ effectively exposed to the page's code.
 - TWA PostMessage additionally requires a browser that supports the TWA
   PostMessage API (for example Chrome 115+). Verifying the TWA does not imply
   the browser also supports PostMessage.
+- `fallback: 'webview'` requires an Android System WebView provider (normally
+  installed on Android; Chrome or another browser can provide it). The WebView
+  fallback does not require a TWA-capable browser.
 - The page must be served over HTTPS.
 - For a verified fullscreen TWA (and for `verification: 'strict'`), the website
   must verify the app through
@@ -439,6 +484,9 @@ the browser opens the URL and decides whether to show fullscreen or browser UI,
 and the result is `verified: false`. PostMessage verification failures are
 reported through `onChannelError` as
 `ERR_TWA_POSTMESSAGE_VERIFICATION_FAILED` in both modes.
+
+Strict verification failures and timeouts never use `fallback: 'custom-tabs'`
+or `fallback: 'webview'`; only browser/session/launch availability failures do.
 
 1. Fetch the file from the device's network:
    `curl https://example.com/.well-known/assetlinks.json`.
@@ -481,6 +529,9 @@ Common causes of `ERR_TWA_VERIFICATION_FAILED`:
   There is no automatic reconnection; relaunch the TWA after a service
   disconnect.
 - Messages sent before `onChannelReady` are rejected, not queued.
+- The WebView fallback has no PostMessage channel and is never reported as a
+  verified TWA. It is used only for browser/session/launch availability
+  failures, never for verification failures.
 - Permissive mode does not make Chrome trust an origin; Chrome still verifies
   the URL and may keep browser UI. Use `verification: 'strict'` when a verified
   fullscreen TWA is mandatory.

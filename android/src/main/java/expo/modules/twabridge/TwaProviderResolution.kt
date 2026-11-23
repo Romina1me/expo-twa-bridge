@@ -13,6 +13,7 @@ internal const val TWA_SERVICE_CATEGORY =
 
 internal enum class FallbackPolicy(val value: String) {
   CUSTOM_TABS("custom-tabs"),
+  WEBVIEW("webview"),
   NONE("none");
 
   companion object {
@@ -23,7 +24,8 @@ internal enum class FallbackPolicy(val value: String) {
 
 internal enum class LaunchSurface(val mode: String) {
   TWA("twa"),
-  CUSTOM_TABS("custom-tabs")
+  CUSTOM_TABS("custom-tabs"),
+  WEBVIEW("webview")
 }
 
 /**
@@ -37,7 +39,7 @@ internal data class ProviderCapabilities(
   val isExplicit: Boolean
 )
 
-internal enum class LaunchStrategy { TWA, CUSTOM_TABS, ERROR }
+internal enum class LaunchStrategy { TWA, CUSTOM_TABS, WEBVIEW, ERROR }
 
 internal data class LaunchDecision(
   val strategy: LaunchStrategy,
@@ -59,20 +61,26 @@ internal fun decideLaunchStrategy(
 ): LaunchDecision {
   if (capabilities.isExplicit) {
     if (!capabilities.installed) {
-      return LaunchDecision(
-        LaunchStrategy.ERROR,
-        "ERR_TWA_BROWSER_UNAVAILABLE",
-        "The requested browser package \"${capabilities.packageName}\" is not installed. " +
-          "No other browser is selected automatically when browserPackage is set."
-      )
+      return when (fallback) {
+        FallbackPolicy.WEBVIEW -> LaunchDecision(LaunchStrategy.WEBVIEW)
+        else -> LaunchDecision(
+          LaunchStrategy.ERROR,
+          "ERR_TWA_BROWSER_UNAVAILABLE",
+          "The requested browser package \"${capabilities.packageName}\" is not installed. " +
+            "No other browser is selected automatically when browserPackage is set."
+        )
+      }
     }
     if (!capabilities.supportsCustomTabs) {
-      return LaunchDecision(
-        LaunchStrategy.ERROR,
-        "ERR_TWA_BROWSER_UNAVAILABLE",
-        "The requested browser package \"${capabilities.packageName}\" does not expose an " +
-          "Android Custom Tabs service, so it cannot host a Trusted Web Activity."
-      )
+      return when (fallback) {
+        FallbackPolicy.WEBVIEW -> LaunchDecision(LaunchStrategy.WEBVIEW)
+        else -> LaunchDecision(
+          LaunchStrategy.ERROR,
+          "ERR_TWA_BROWSER_UNAVAILABLE",
+          "The requested browser package \"${capabilities.packageName}\" does not expose an " +
+            "Android Custom Tabs service, so it cannot host a Trusted Web Activity."
+        )
+      }
     }
   }
 
@@ -83,12 +91,13 @@ internal fun decideLaunchStrategy(
   if (capabilities.supportsCustomTabs && capabilities.packageName != null) {
     return when (fallback) {
       FallbackPolicy.CUSTOM_TABS -> LaunchDecision(LaunchStrategy.CUSTOM_TABS)
+      FallbackPolicy.WEBVIEW -> LaunchDecision(LaunchStrategy.WEBVIEW)
       FallbackPolicy.NONE -> LaunchDecision(
         LaunchStrategy.ERROR,
         "ERR_TWA_NO_BROWSER",
         "The available browser \"${capabilities.packageName}\" does not support Trusted Web " +
           "Activities. Install a TWA-capable browser (for example Chrome) or use " +
-          "fallback: \"custom-tabs\"."
+          "fallback: \"custom-tabs\" or \"webview\"."
       )
     }
   }
@@ -100,6 +109,7 @@ internal fun decideLaunchStrategy(
       "No browser supporting Android Custom Tabs is installed, so neither a Trusted Web " +
         "Activity nor the Custom Tabs fallback can be launched."
     )
+    FallbackPolicy.WEBVIEW -> LaunchDecision(LaunchStrategy.WEBVIEW)
     FallbackPolicy.NONE -> LaunchDecision(
       LaunchStrategy.ERROR,
       "ERR_TWA_NO_BROWSER",
@@ -107,6 +117,23 @@ internal fun decideLaunchStrategy(
         "A Custom Tab or regular browser is not used as a fallback."
     )
   }
+}
+
+/**
+ * Chooses the retry surface for a fallback-eligible TWA launch failure.
+ *
+ * Verification and configuration failures are never fallback-eligible, so this
+ * returns null for them regardless of the configured policy. `none` never
+ * falls back.
+ */
+internal fun resolveFallbackStrategy(
+  fallback: FallbackPolicy,
+  fallbackEligible: Boolean
+): LaunchStrategy? = when {
+  !fallbackEligible -> null
+  fallback == FallbackPolicy.CUSTOM_TABS -> LaunchStrategy.CUSTOM_TABS
+  fallback == FallbackPolicy.WEBVIEW -> LaunchStrategy.WEBVIEW
+  else -> null
 }
 
 internal object TwaProviderResolver {

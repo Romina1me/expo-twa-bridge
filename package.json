@@ -1,6 +1,6 @@
 {
   "name": "expo-twa-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A reusable Expo native module for Android Trusted Web Activities",
   "main": "build/index.js",
   "types": "build/index.d.ts",

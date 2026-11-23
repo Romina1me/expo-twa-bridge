@@ -3,8 +3,17 @@ export type TwaDisplayMode = 'default' | 'immersive';
 /**
  * What to do when a Trusted Web Activity cannot be launched because of a
  * browser or environment problem.
+ *
+ * - `custom-tabs` (default): open the URL in Android Custom Tabs with the
+ *   browser chrome visible.
+ * - `webview`: open the URL in a dedicated fullscreen Android WebView
+ *   Activity. The WebView fallback has no PostMessage channel.
+ * - `none`: reject with a descriptive error.
+ *
+ * Digital Asset Links verification failures and timeouts never use any
+ * fallback, regardless of this setting.
  */
-export type TwaFallbackMode = 'custom-tabs' | 'none';
+export type TwaFallbackMode = 'custom-tabs' | 'webview' | 'none';
 
 /**
  * How the module treats Digital Asset Links verification before opening the
@@ -15,7 +24,7 @@ export type TwaVerificationMode = 'strict' | 'permissive';
 /**
  * Surface that actually opened the URL.
  */
-export type TwaLaunchMode = 'twa' | 'custom-tabs';
+export type TwaLaunchMode = 'twa' | 'custom-tabs' | 'webview';
 
 export type TwaLaunchResult = {
   mode: TwaLaunchMode;
@@ -23,8 +32,8 @@ export type TwaLaunchResult = {
    * `true` only when this module confirmed Digital Asset Links verification
    * before opening a fullscreen Trusted Web Activity.
    *
-   * Always `false` in `permissive` mode and whenever `mode` is `custom-tabs`:
-   * an unverified navigation is never reported as verified.
+   * Always `false` in `permissive` mode and whenever `mode` is `custom-tabs`
+   * or `webview`: an unverified navigation is never reported as verified.
    */
   verified: boolean;
 };
@@ -95,6 +104,11 @@ export type TwaLaunchOptions = {
    * - `custom-tabs` (default): open the same URL in Android Custom Tabs with
    *   the browser chrome visible. PostMessage keeps working through the same
    *   Custom Tabs session.
+   * - `webview`: open the same URL in a dedicated fullscreen Android WebView
+   *   Activity. It is used only for browser/session/launch availability
+   *   failures. PostMessage is unavailable on this surface: when it was
+   *   requested, `onChannelError` reports
+   *   `ERR_TWA_POSTMESSAGE_UNAVAILABLE`.
    * - `none`: reject with a descriptive error.
    *
    * Digital Asset Links verification failures and timeouts never fall back —
@@ -137,6 +151,11 @@ export type TwaLaunchOptions = {
    *
    * The channel is requested after the first navigation finishes. Listen for
    * `onChannelReady` before calling `postMessage()`.
+   *
+   * PostMessage is not available in the WebView fallback. If the WebView
+   * fallback is used, `onChannelError` reports
+   * `ERR_TWA_POSTMESSAGE_UNAVAILABLE` and `postMessage()` rejects with
+   * `ERR_TWA_POSTMESSAGE_NOT_READY`.
    */
   postMessage?: TwaPostMessageOptions;
 };

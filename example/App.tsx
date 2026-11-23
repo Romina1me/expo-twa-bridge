@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Button,
+  Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -12,14 +13,26 @@ import {
 } from 'react-native';
 
 import { ExpoTwaBridge, TwaLaunchError } from 'expo-twa-bridge';
-import type { TwaLaunchMode } from 'expo-twa-bridge';
+import type { TwaFallbackMode, TwaLaunchMode } from 'expo-twa-bridge';
 
 const DEFAULT_URL = 'https://app.figfit.ir/';
+
+const FALLBACK_LABELS: Record<TwaFallbackMode, string> = {
+  'custom-tabs': 'Custom Tabs',
+  webview: 'WebView',
+  none: 'None',
+};
+
+const FALLBACK_MODES: TwaFallbackMode[] = ['custom-tabs', 'webview', 'none'];
+
+// Simulates a device with no TWA-capable browser so the example can always
+// show the WebView fallback.
+const PREVIEW_WEBVIEW_BROWSER_PACKAGE = 'com.expo.twa.bridge.preview';
 
 export default function App() {
   const [url, setUrl] = useState(DEFAULT_URL);
   const [immersive, setImmersive] = useState(true);
-  const [allowCustomTabsFallback, setAllowCustomTabsFallback] = useState(true);
+  const [fallback, setFallback] = useState<TwaFallbackMode>('webview');
   const [browserPackage, setBrowserPackage] = useState('');
   const [isLaunching, setIsLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -70,8 +83,13 @@ export default function App() {
         url,
         verification: 'strict',
         displayMode: immersive ? 'immersive' : 'default',
-        fallback: allowCustomTabsFallback ? 'custom-tabs' : 'none',
-        browserPackage: browserPackage.trim() || undefined,
+        fallback,
+        // Selecting WebView forces the availability failure so the example
+        // always shows the WebView fallback instead of a real TWA.
+        browserPackage:
+          fallback === 'webview'
+            ? PREVIEW_WEBVIEW_BROWSER_PACKAGE
+            : browserPackage.trim() || undefined,
         splashScreen: {
           image: require('./assets/splash.png'),
           backgroundColor: '#0B7285',
@@ -120,13 +138,38 @@ export default function App() {
           />
         </View>
 
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>Fallback to Custom Tabs</Text>
-          <Switch
-            value={allowCustomTabsFallback}
-            onValueChange={setAllowCustomTabsFallback}
-            disabled={isLaunching}
-          />
+        <View style={styles.fallbackGroup}>
+          <Text style={styles.rowLabel}>Fallback when a TWA cannot launch</Text>
+          <View style={styles.fallbackOptions}>
+            {FALLBACK_MODES.map((mode) => (
+              <Pressable
+                key={mode}
+                accessibilityRole="button"
+                accessibilityState={{ selected: fallback === mode }}
+                disabled={isLaunching}
+                onPress={() => setFallback(mode)}
+                style={[
+                  styles.fallbackOption,
+                  fallback === mode && styles.fallbackOptionSelected,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.fallbackOptionText,
+                    fallback === mode && styles.fallbackOptionTextSelected,
+                  ]}
+                >
+                  {FALLBACK_LABELS[mode]}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          {fallback === 'webview' ? (
+            <Text style={styles.hint}>
+              Preview mode: an unavailable browser package is passed so the
+              fullscreen WebView fallback opens. PostMessage is unavailable.
+            </Text>
+          ) : null}
         </View>
 
         <TextInput
@@ -142,11 +185,13 @@ export default function App() {
         {isLaunching ? (
           <View style={styles.loading}>
             <ActivityIndicator />
-            <Text style={styles.loadingText}>Opening Trusted Web Activity…</Text>
+            <Text style={styles.loadingText}>
+              Opening {fallback === 'webview' ? 'WebView' : 'Trusted Web Activity'}…
+            </Text>
           </View>
         ) : (
           <Button
-            title="Open TWA"
+            title={fallback === 'webview' ? 'Open WebView' : 'Open TWA'}
             onPress={handleLaunch}
             disabled={url.trim().length === 0}
           />
@@ -156,7 +201,11 @@ export default function App() {
         {launchMode ? (
           <Text style={styles.status}>
             Opened in:{' '}
-            {launchMode === 'twa' ? 'Trusted Web Activity' : 'Custom Tab'}
+            {launchMode === 'twa'
+              ? 'Trusted Web Activity'
+              : launchMode === 'custom-tabs'
+                ? 'Custom Tab'
+                : 'WebView fallback'}
           </Text>
         ) : null}
 
@@ -224,6 +273,37 @@ const styles = StyleSheet.create({
     color: '#333333',
     flex: 1,
     marginRight: 12,
+  },
+  fallbackGroup: {
+    gap: 8,
+  },
+  fallbackOptions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  fallbackOption: {
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderColor: '#cccccc',
+    borderRadius: 8,
+    borderWidth: 1,
+    flex: 1,
+    paddingVertical: 10,
+  },
+  fallbackOptionSelected: {
+    backgroundColor: '#0B7285',
+    borderColor: '#0B7285',
+  },
+  fallbackOptionText: {
+    color: '#333333',
+  },
+  fallbackOptionTextSelected: {
+    color: '#ffffff',
+    fontWeight: '600',
+  },
+  hint: {
+    color: '#555555',
+    fontSize: 12,
   },
   loading: {
     alignItems: 'center',

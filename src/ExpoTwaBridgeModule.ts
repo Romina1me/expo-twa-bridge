@@ -49,7 +49,7 @@ const ExpoTwaBridgeModule =
   requireNativeModule<ExpoTwaBridgeNativeModule>('ExpoTwaBridge');
 
 function parseLaunchMode(value: string): TwaLaunchMode {
-  if (value === 'twa' || value === 'custom-tabs') {
+  if (value === 'twa' || value === 'custom-tabs' || value === 'webview') {
     return value;
   }
   throw new TwaLaunchError(
@@ -92,7 +92,11 @@ export const ExpoTwaBridge = {
    *
    * When the TWA cannot launch because of a browser or environment problem and
    * `fallback` is `'custom-tabs'` (the default), the URL is opened in Android
-   * Custom Tabs instead and the result is `{ mode: 'custom-tabs' }`.
+   * Custom Tabs instead and the result is `{ mode: 'custom-tabs' }`. With
+   * `fallback: 'webview'`, the URL is opened in a dedicated fullscreen WebView
+   * Activity instead and the result is `{ mode: 'webview' }`. The WebView
+   * fallback has no PostMessage channel; `onChannelError` reports
+   * `ERR_TWA_POSTMESSAGE_UNAVAILABLE` when PostMessage was requested.
    *
    * @throws {TwaLaunchError} in `strict` mode with
    * `ERR_TWA_VERIFICATION_FAILED` / `ERR_TWA_VERIFICATION_TIMEOUT` when the
@@ -158,7 +162,9 @@ export const ExpoTwaBridge = {
    * channel. The channel must be ready; listen for `onChannelReady` first.
    *
    * The channel is backed by the browser session, so it also works when the
-   * Custom Tabs fallback opened the URL.
+   * Custom Tabs fallback opened the URL. It is never available when the
+   * WebView fallback opened the URL; in that case this rejects with
+   * `ERR_TWA_POSTMESSAGE_NOT_READY`.
    */
   async postMessage(message: string): Promise<void> {
     try {
